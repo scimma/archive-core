@@ -18,10 +18,12 @@ extention to SQLite.
 """
 
 import psycopg2
-#import psycopg2.extensions  # unused?
 import boto3
 from botocore.exceptions import ClientError
+import aiopg
+import aioboto3
 import logging
+from collections import namedtuple
 from . import utility_api
 import os
 
@@ -73,6 +75,9 @@ class Base_db:
     def connect(self):
         "nothing to connect to"
 
+    def close(self):
+        pass
+
     def log(self):
         "log db informmation, but not too often"
         msg1 = f"inserted  {self.n_inserted} objects."
@@ -85,6 +90,14 @@ class Base_db:
             logging.info(msg1)
 
     def insert(self, payload, metadata, annotations):
+        raise NotImplementedError
+
+    MessageRecord = namedtuple("MessageRecord",
+                               ["topic", "timestamp", "uuid", "size", "key", 
+                                "bucket", "crc32", "is_client_uuid", 
+                                "message_crc32"])
+
+    def fetch(self, uuid) -> MessageRecord:
         raise NotImplementedError
 
     def uuid_in_db(self, uuid):
@@ -151,9 +164,6 @@ class Mock_db(Base_db):
 
 
 class SQL_db(Base_db):
-    """
-    Logging to SQL postgres DBs
-    """
     def __init__(self, config):
         # allow some of these things to be None as a subclass may have its own ways of setting them
         super().__init__(config)
@@ -162,24 +172,29 @@ class SQL_db(Base_db):
         self.password  = os.environ.get("DB_PASSWORD", None)
         self.host      = config.get("db_host", None)
         self.port      = config.get("db_port", 5432)
+        self.maxconn   = config.get("db_pool_size", 16)
 
-    def connect(self):
+    async def connect(self):
         "create  a session to postgres"
         if not self.password:   
             raise RuntimeError("SQL database password was not configured")
         if not self.host:   
             raise RuntimeError("SQL database host was not configured")
-        self.conn = psycopg2.connect(
+        self.pool = await aiopg.create_pool(
             dbname  = self.db_name,
             user    = self.user_name,
             password = self.password,
             host     = self.host,
-            port     = self.port
+            port     = self.port,
+            minsize  = 1,
+            maxsize  = self.maxconn
         )
-        self.conn.autocommit = True
-        self.cur = self.conn.cursor()
 
-    def make_schema(self):
+    async def close(self):
+        self.pool.close()
+        await self.pool.wait_closed()
+
+    async def make_schema(self):
         "Declare tables"
         sql =  """
         CREATE TABLE IF NOT EXISTS
@@ -201,9 +216,10 @@ class SQL_db(Base_db):
         CREATE INDEX IF NOT EXISTS key_idx       ON messages (key);
         CREATE INDEX IF NOT EXISTS uuid_idx      ON messages (uuid);
         """
-        self.cur.execute(sql)
+        with (await self.pool.cursor()) as cur:
+            await cur.execute(sql)
 
-    def insert(self, payload, metadata, annotations):
+    async def insert(self, payload, metadata, annotations):
         "insert one record into the DB"
         if self.read_only:
             raise RuntimeError("This database object is set to read-only; insert is forbidden")
@@ -223,18 +239,35 @@ class SQL_db(Base_db):
                   annotations['con_is_client_uuid'],
                   annotations['con_message_crc32']
                   ]
-        self.cur.execute(sql,values)
+        with (await self.pool.cursor()) as cur:
+            await cur.execute(sql,values)
         self.n_inserted +=1
         self.log()
 
-    def _query(self, sql, expect_results=True):
-        "execute SQL, return results if expected"
-        self.cur.execute(sql)
-        if expect_results:
-            results = self.cur.fetchall()
-            return results
+    async def fetch(self, uuid) -> Base_db.MessageRecord:
+        """
+        Fetch one mesage record (if it exists) from the DB.
+        
+        Returns: A tuple of all entries in the database row, or None if no
+                 matching row was found.
+        """
+        query = f"SELECT * FROM messages WHERE uuid='{str(uuid)}';"
+        with (await self.pool.cursor()) as cur:
+            await cur.execute(query)
+            if cur.rowcount == 0:
+                return None
+            record = await cur.fetchone()
+            return Base_db.MessageRecord(*record[1:])
 
-    def uuid_in_db(self, uuid):
+    async def _query(self, sql, expect_results=True):
+        "execute SQL, return results if expected"
+        with (await self.pool.cursor()) as cur:
+            await cur.execute(sql)
+            if expect_results:
+                results = await cur.fetchall()
+                return results
+
+    async def uuid_in_db(self, uuid):
         """
         Determine if this UUID is in the database
         """
@@ -246,11 +279,12 @@ class SQL_db(Base_db):
            WHERE
             uuid = '{uuid}'
         """
-        self.cur.execute(sql)
-        result = self.cur.fetchall()
-        return result[0][0] != 0
+        with (await self.pool.cursor()) as cur:
+            await cur.execute(sql)
+            result = await cur.fetchall()
+            return result[0][0] != 0
 
-    def exists_in_db(self, topic, timestamp, message_crc32):
+    async def exists_in_db(self, topic, timestamp, message_crc32):
         """
         Check whether a message with the given CRC sent at the given timestamp
         has previously been seen on the given topic.
@@ -267,11 +301,12 @@ class SQL_db(Base_db):
           AND
           message_crc32 = '{message_crc32}'
         """
-        self.cur.execute(sql)
-        result = self.cur.fetchall()
-        return result[0][0] != 0
+        with (await self.pool.cursor()) as cur:
+            await cur.execute(sql)
+            result = await cur.fetchall()
+            return result[0][0] != 0
     
-    def get_client_uuid_duplicates(self, limit: int = 1):
+    async def get_client_uuid_duplicates(self, limit: int = 1):
         """
         list UUIDs that are duplicates of an original UUID
     
@@ -292,9 +327,9 @@ class SQL_db(Base_db):
              count(*) > 1
             LIMIT {args["limit"]}
         """
-        return self._query(sql_client_side)
+        return await self._query(sql_client_side)
 
-    def get_server_uuid_duplicates(self, limit: int = 1):
+    async def get_server_uuid_duplicates(self, limit: int = 1):
         """
         list UUIDs that are duplicates of an original UUID
     
@@ -312,14 +347,15 @@ class SQL_db(Base_db):
              count(*) > 1
             LIMIT {args["limit"]}
         """
-        return self._query(sql_server_side)
+        return await self._query(sql_server_side)
 
-    def set_read_only(self):
+    async def set_read_only(self):
         """
         Configure this database object to only perform reads, rejecting all modification operations.
         """
         super().set_read_only()
-        self.cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;")
+        with (await self.pool.cursor()) as cur:
+            await cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;")
 
     def launch_db_session(self):
         "lauch a query_session tool for AWS databases"
@@ -341,7 +377,7 @@ class SQL_db(Base_db):
         """
         pass #not implemented this version
     
-    def get_message_locations(ids):
+    async def get_message_locations(ids):
         """
         Get the location in the store of each of a set of messages spcified by
         UUID.
@@ -351,7 +387,25 @@ class SQL_db(Base_db):
         """
         list_text = "(" + ids.join(",")  + ")"
         sql = f"select bucket, key from messages where id in {list_text}"
-        return self._query(sql)
+        return await self._query(sql)
+
+    async def get_message_records_for_time_range(self, topic: str, start_time: int, end_time: int, limit: int=10, offset: int=0):
+        query = f"""
+        SELECT * 
+        FROM messages 
+        WHERE
+         topic='{topic}' AND
+         timestamp>='{start_time}' AND
+         timestamp<'{end_time}'
+        ORDER BY timestamp
+        LIMIT {limit}
+        OFFSET {offset}
+        ;
+        """
+        with (await self.pool.cursor()) as cur:
+            await cur.execute(query)
+            result = await cur.fetchall()
+            return [Base_db.MessageRecord(*record[1:]) for record in result]
 
 
 class AWS_db(SQL_db):
@@ -368,7 +422,7 @@ class AWS_db(SQL_db):
         self.set_password_info()
         self.set_connect_info()
         logging.info(f"aws db name, secret, region: {self.db_name}, {self.aws_db_secret_name}, {self.aws_region_name } ")
-        logging.info(f"aws database, user, port, address: {self.DBName}, {self.MasterUserName}, {self.Port} ,{self.Address}")
+        logging.info(f"aws database, user, port, address: {self.db_name}, {self.user_name}, {self.port} ,{self.host}")
 
     def set_password_info(self):
         "retrieve postgress password from its AWS secret"

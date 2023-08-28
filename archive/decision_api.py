@@ -20,6 +20,7 @@ This moodule supports
 # Batch decisions routines
 #################
 
+import logging
 import uuid
 import zlib
 
@@ -82,7 +83,7 @@ def get_annotations(message, headers=[]):
 ###################
 
 
-def is_deemed_duplicate(annotations, metadata, db, store):
+async def is_deemed_duplicate(annotations, metadata, db, store):
     """
     Decide if this message is a duplicate.
     Updates annotations with a duplicate entry mapping to the result
@@ -90,10 +91,10 @@ def is_deemed_duplicate(annotations, metadata, db, store):
     # storage decision_data
     if annotations['con_is_client_uuid']:
         # Use the fact that client side UUID are unique
-        duplicate = db.uuid_in_db(annotations['con_text_uuid'])
+        duplicate = await db.uuid_in_db(annotations['con_text_uuid'])
     else:
         # server side UUID.
         message_crc32 = annotations["con_message_crc32"]
-        duplicate = db.exists_in_db(metadata.topic, metadata.timestamp, message_crc32)
+        duplicate = await db.exists_in_db(metadata.topic, metadata.timestamp, message_crc32)
     annotations["duplicate"] = duplicate
     return duplicate

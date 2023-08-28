@@ -9,6 +9,18 @@ import toml
 #   environment                                                                                                                             
 ##################################                                                                                                          
 
+def load_toml_config(file_path, config):
+	"""Load settings from file_path and merge into config"""
+	print(f"Loading configuration from {file_path}")
+	try:
+		toml_data = toml.load(file_path)
+		for key, value in toml_data.items():
+			if '-' in key:
+				key = key.replace('-','_')
+			setattr(config, key, value)
+	except:
+		raise RuntimeError(f"Unable to read TOML config from {file_path}")
+
 class LoadTomlConfig(argparse.Action):
     def __init__(self, **kwargs):
         if "default" in kwargs:
@@ -17,17 +29,8 @@ class LoadTomlConfig(argparse.Action):
         super().__init__(**kwargs)
     
     def __call__(self, parser, namespace, file_path, option_string=None):
-#         for file_path in values:
-        print(f"Loading configuration from {file_path}")
-        try:
-            toml_data = toml.load(file_path)
-            delattr(namespace, self.dest)
-            for key, value in toml_data.items():
-                if '-' in key:
-                    key = key.replace('-','_')
-                setattr(namespace, key, value)
-        except:
-            raise RuntimeError(f"Unable to read TOML config from {file_path}")
+        delattr(namespace, self.dest)
+        load_toml_config(file_path, namespace)
 
 
 class EnvDefault(argparse.Action):

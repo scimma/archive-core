@@ -19,6 +19,7 @@ as provided by argparse, as part of their interface.
 
 import boto3
 import botocore
+import aioboto3
 import bson
 import logging
 import time
@@ -31,12 +32,12 @@ import os
 ##################################
 
 def StoreFactory(config):
-	type = config["store_type"]
-	#instantiate, then return db object of correct type.
-	if type == "mock" : return Mock_store(config)
-	if type == "S3"   : return S3_store  (config)
-	logging.fatal(f"store {type} not supported")
-	exit(1)
+    type = config["store_type"]
+    #instantiate, then return db object of correct type.
+    if type == "mock" : return Mock_store(config)
+    if type == "S3"   : return S3_store  (config)
+    logging.fatal(f"store {type} not supported")
+    exit(1)
 
 
 def add_parser_options(parser):
@@ -55,7 +56,7 @@ class Base_store:
         self.primary_bucket = config["store_primary_bucket"]
         self.backup_bucket  = config["store_backup_bucket"]
         ## If custom S3 endpoint is specified, assume non-AWS config
-        if 'store_endpoint_url' in config:
+        if 'store_endpoint_url' in config and config['store_endpoint_url'] is not None:
             self.s3_provider = 'custom'
             self.s3_endpoint_url = config['store_endpoint_url']
             self.s3_region_name = config['store_region_name']
@@ -73,6 +74,9 @@ class Base_store:
         self.config = config
 
     def connect(self):
+        pass
+
+    def close(self):
         pass
 
     def log(self, annotations):
@@ -133,10 +137,27 @@ class S3_store(Base_store):
     def __init__(self, config):
         super().__init__(config)
 
-    def initialize_bucket(self, bucket=''):
+    async def connect(self):
+        "obtain an S3 Client"
+        if self.s3_provider == 'custom':
+            self.client = await aioboto3.Session().client('s3',
+                endpoint_url=self.s3_endpoint_url,
+                region_name = self.s3_region_name,
+                aws_access_key_id=self.aws_access_key_id,
+                aws_secret_access_key=self.aws_secret_access_key,
+            ).__aenter__()
+            await self.initialize_bucket(bucket=self.primary_bucket)
+            await self.initialize_bucket(bucket=self.backup_bucket)
+        else:
+            self.client = await aioboto3.Session().client('s3').__aenter__()
+
+    async def close(self):
+        await self.client.close()
+
+    async def initialize_bucket(self, bucket=''):
         exists = True
         try:
-            self.client.head_bucket(Bucket=bucket)
+            await self.client.head_bucket(Bucket=bucket)
         except botocore.exceptions.ClientError as e:
             # If a client error is thrown, then check that it was a 404 error.
             # If it was a 404 error, then the bucket does not exist.
@@ -145,23 +166,9 @@ class S3_store(Base_store):
                 exists = False
         if not exists:
             ## Create buckets if they do not exist
-            self.client.create_bucket(Bucket=bucket)
+            await self.client.create_bucket(Bucket=bucket)
 
-    def connect(self):
-        "obtain an S3 Client"
-        if self.s3_provider == 'custom':
-            self.client = boto3.client('s3',
-                endpoint_url=self.s3_endpoint_url,
-                region_name = self.s3_region_name,
-                aws_access_key_id=self.aws_access_key_id,
-                aws_secret_access_key=self.aws_secret_access_key,
-            )
-            self.initialize_bucket(bucket=self.primary_bucket)
-            self.initialize_bucket(bucket=self.backup_bucket)
-        else:
-            self.client = boto3.client('s3')
-
-    def store(self, payload, metadata, annotations):
+    async def store(self, payload, metadata, annotations):
         """place data, metadata as an object in S3"""
         if self.read_only:
             raise RuntimeError("This store object is set to read-only; store is forbidden")
@@ -171,13 +178,13 @@ class S3_store(Base_store):
         b = self.get_as_bson(payload, metadata, annotations)
         size = len(b)
         crc32 = zlib.crc32(b)
-        self.client.put_object(Body=b, Bucket=bucket, Key=key)
+        await self.client.put_object(Body=b, Bucket=bucket, Key=key)
         self.n_stored += 1
         self.set_storeinfo(annotations, key, size, crc32)
         self.log(annotations)
         return
 
-    def deep_delete_object_from_store(self, key):
+    async def deep_delete_object_from_store(self, key):
         """
         delete all corresponding objects  from all S3 archive
         including versions and delete markers.
@@ -187,10 +194,10 @@ class S3_store(Base_store):
         if self.read_only:
             raise RuntimeError("This store object is set to read-only; "
                                "deep_delete_object_from_store is forbidden")
-        self.deep_delete_object(self.primary_bucket, key)
-        self.deep_delete_object(self.backup_bucket, key)
+        await self.deep_delete_object(self.primary_bucket, key)
+        await self.deep_delete_object(self.backup_bucket, key)
 
-    def deep_delete_object(self, bucket_name, key):
+    async def deep_delete_object(self, bucket_name, key):
         """
         delete all contents related to object from the S3
         bucket.
@@ -202,23 +209,30 @@ class S3_store(Base_store):
                                "deep_delete_object is forbidden")
 
         assert "mock" in key or "archive-ingest-test" or "cmb-s4-fabric-tests.housekeeping-test" in key
-        s3  = boto3.resource('s3')
-        bucket = s3.Bucket(bucket_name)
-        bucket.object_versions.filter(Prefix=key).delete()
+        bucket = await self.client.Bucket(bucket_name)
+        await bucket.object_versions.filter(Prefix=key).delete()
 
-    def get_object(self, key):
-        "return oject from S3"
-        response = self.client.get_object(
+    async def get_object_lazily(self, key):
+        """
+        Fetch an object from S3, directly returning the S3 response object,
+        allowing uses like streaming the object data.
+        """
+        response = await self.client.get_object(
             Bucket=self.primary_bucket,
             Key=key)
+        return response
+
+    async def get_object(self, key):
+        "return oject from S3"
+        response = await self.get_object_raw(key)
         data = response['Body'].read()
         return data
 
-    def get_object_summary(self, key):
+    async def get_object_summary(self, key):
         "if not overriden, print error and die"
         summary = {"exists" : False}
         try:
-            response = self.client.get_object(
+            response = await self.client.get_object(
                 Bucket=self.primary_bucket,
                 Key=key)
 
@@ -242,11 +256,10 @@ class S3_store(Base_store):
         return summary
 
     
-    def list_object_versions(self, prefix):
+    async def list_object_versions(self, prefix):
         """ list all onecht verision under prefix"""
-        s3 = session.resource('s3')
-        my_bucket = s3.Bucket('self.primary_bucket')
-        for _object in my_bucket.objects.all():
+        my_bucket = await self.client.Bucket('self.primary_bucket')
+        async for object in my_bucket.objects.all():
             print(object.key)
         """    
         paginator = client.get_paginator('list_objects')
