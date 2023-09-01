@@ -100,6 +100,7 @@ class NativePostgresServer(PostgresServer):
 			"lc_numeric": "'en_US.UTF-8'",
 			"lc_time": "'en_US.UTF-8'",
 			"default_text_search_config": "'pg_catalog.english'",
+			"unix_socket_directories": "'"+self.datadir+"'"
 		}
 		defaults.update(kwargs)
 		with open(self.datadir+"/postgresql.conf", 'w') as f:
@@ -110,7 +111,7 @@ class NativePostgresServer(PostgresServer):
 				f.write('\n')
 
 	def __init__(self, datadir: str, max_start_attempts: int = 10):
-		self.datadir = datadir
+		self.datadir = str(datadir)
 		logging.info("Initialiing postgres in", self.datadir)
 		log_path = datadir+"/logfile"
 		init_result = self.run_control("init")
