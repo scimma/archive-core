@@ -40,20 +40,19 @@ def DbFactory(config):
     if type == "mock" : return Mock_db(config)
     if type == "sql"  : return SQL_db(config)
     if type == "aws"  : return AWS_db(config)
-    logging.fatal(f"database {type} not supported")
-    exit(1)
+    raise RuntimeError(f"database {type} not supported")
 
 
 def add_parser_options(parser):
     EnvDefault=utility_api.EnvDefault
-    parser.add_argument("--db-type", help="Type of database to use for metadata storage", type=str, choices=["sql","aws", "mock"], action=EnvDefault, envvar="DB_TYPE", required=False)
+    parser.add_argument("--db-type", help="Type of database to use for metadata storage", type=str, choices=["sql","aws","mock"], action=EnvDefault, envvar="DB_TYPE", required=False)
     parser.add_argument("--db-host", help="Hostname for the metadata database", type=str, action=EnvDefault, envvar="DB_HOST", required=False)
     parser.add_argument("--db-port", help="Port for connecting to the metadata database", type=int, action=EnvDefault, envvar="DB_PORT", required=False)
     parser.add_argument("--db-name", help="Name of the metadata database", type=str, action=EnvDefault, envvar="DB_NAME", required=False)
     parser.add_argument("--db-username", help="Name of the user for the metadata database", type=str, action=EnvDefault, envvar="DB_USERNAME", required=False)
     parser.add_argument("--db-log-frequency", help="How often (in number of inserts) to log database insertions", type=int, action=EnvDefault, envvar="DB_LOG_FREQUENCY", default=100, required=False)
     parser.add_argument("--db-aws-secret-name", help="Name of an AWS secret from which to read database connection info", type=str, action=EnvDefault, envvar="DB_AWS_SECRET_NAME", required=False)
-    parser.add_argument("--db-aws-region", help="Name of the AWS region in which to look for the database and AWS secret", type=str, action=EnvDefault, envvar="DB_AWS_SECRET_REGION", default="us-west-2", required=False)
+    parser.add_argument("--db-aws-region", help="Name of the AWS region in which to look for the database and AWS secret", type=str, action=EnvDefault, envvar="DB_AWS_REGION", default="us-west-2", required=False)
 
 
 class Base_db:
@@ -64,19 +63,12 @@ class Base_db:
         self.log_every = config.get("db_log_frequency",100)
         self.read_only = False
 
-    def launch_db_session(self):
+    async def launch_db_session(self):
         "lauch a shell level query session given credentials"
-        logging.fatal(f"Query_Session tool not supported for this database")
-        exit(1)
+        raise NotImplementedError(f"Query_Session tool not supported for this database")
 
-    def make_schema(self):
+    async def make_schema(self):
         "no schema to make"
-
-    def connect(self):
-        "nothing to connect to"
-
-    def close(self):
-        pass
 
     def log(self):
         "log db informmation, but not too often"
@@ -89,7 +81,7 @@ class Base_db:
         elif self.n_inserted % self.log_every == 0:
             logging.info(msg1)
 
-    def insert(self, payload, metadata, annotations):
+    async def insert(self, metadata, annotations):
         raise NotImplementedError
 
     MessageRecord = namedtuple("MessageRecord",
@@ -97,20 +89,20 @@ class Base_db:
                                 "bucket", "crc32", "is_client_uuid", 
                                 "message_crc32"])
 
-    def fetch(self, uuid) -> MessageRecord:
+    async def fetch(self, uuid) -> MessageRecord:
         raise NotImplementedError
 
-    def uuid_in_db(self, uuid):
+    async def uuid_in_db(self, uuid):
         raise NotImplementedError
 
-    def exists_in_db(self, topic, timestamp, message_crc32):
+    async def exists_in_db(self, topic, timestamp, message_crc32):
         """
         Check whether a message with the given CRC sent at the given timestamp
         has previously been seen on the given topic.
         """
         raise NotImplementedError
 
-    def get_client_uuid_duplicates(self, limit: int = 1):
+    async def get_client_uuid_duplicates(self, limit: int = 1):
         """
         list UUIDs that are duplicates of an original UUID
     
@@ -122,23 +114,29 @@ class Base_db:
         """
         raise NotImplementedError
 
-    def get_server_uuid_duplicates(self, limit: int = 1):
+    async def get_content_duplicates(self, limit: int = 1):
         """
-        list UUIDs that are duplicates of an original UUID
-    
-        This routine detects messages having UUIDs
-        generated on the archive_ingest.py _server_.
+        List messages which are probably duplicated based on their content checksums
         """
         raise NotImplementedError
 
-    def set_read_only(self):
+    async def set_read_only(self):
         """
         Configure this database object to only perform reads, rejecting all
         modification operations.
         """
         self.read_only = True
+
+    async def get_message_id(self, uuid):
+        """
+        Get the primary key associated with a message with the given UUID.
+        This is a low-level interface intended mainly for testing.
+        If duplicate UUIDs have gotten into the database, this will return
+        only the id for one of them.
+        """
+        raise NotImplementedError
     
-    def get_message_locations(ids):
+    async def get_message_locations(self, ids):
         """
         Get the location in the store of each of a set of messages spcified by
         UUID.
@@ -156,18 +154,108 @@ class Mock_db(Base_db):
     def __init__(self, config):
         logging.info(f"Mock Database configured")
         super().__init__(config)
+        self.data = {}
+        self.next_id = 0
+        self.connected = False
 
-    def insert(self, payload, message, annotations):
-        "accept and discard data"
-        self.n_inserted += 1
-        self.log()
+    async def connect(self):
+        self.connected = True
 
+    async def close(self):
+        self.connected = False
+
+    async def insert(self, metadata, annotations):
+        if self.read_only:
+            raise RuntimeError("This database object is set to read-only; insert is forbidden")
+        assert self.connected
+        
+        value = Base_db.MessageRecord(
+                  metadata.topic,
+                  metadata.timestamp,
+                  annotations['con_text_uuid'],
+                  annotations['size'],
+                  annotations['key'],
+                  annotations['bucket'],
+                  annotations['crc32'],
+                  annotations['con_is_client_uuid'],
+                  annotations['con_message_crc32']
+                  )
+        self.data[self.next_id] = value
+        self.next_id += 1
+
+    async def fetch(self, uuid) -> Base_db.MessageRecord:
+        assert self.connected
+        for record in self.data.values():
+            if record.uuid == uuid:
+                return record
+        return None
+
+    async def uuid_in_db(self, uuid):
+        assert self.connected
+        for record in self.data.values():
+            if record.uuid == uuid:
+                return True
+        return None
+
+    async def exists_in_db(self, topic, timestamp, message_crc32):
+        assert self.connected
+        # This is not at all efficient, but should not be used for serious amounts of data
+        for record in self.data.values():
+            if record.topic == topic and record.timestamp == timestamp \
+              and record.message_crc32 == message_crc32:
+                return True
+        return False
+
+    async def get_message_id(self, uuid):
+        """
+        Get the primary key associated with a message with the given UUID.
+        This is a low-level interface intended mainly for testing.
+        If duplicate UUIDs have gotten into the database, this will return
+        only the id for one of them.
+        """
+        assert self.connected
+        for id, record in self.data.items():
+            if record.uuid == uuid:
+                return id
+        return None
+
+    async def get_message_locations(self, ids):
+        """
+        Get the location in the store of each of a set of messages spcified by
+        UUID.
+        
+        Return: A sequence of tuples of bucket name, key where each mesage can
+                be found in the data store.
+        """
+        assert self.connected
+        results = []
+        for id in ids:
+            if id in self.data:
+                record = self.data[id]
+                results.append((record.bucket, record.key))
+            # TODO do what if id is not known?
+        return results
+
+    async def get_message_records_for_time_range(self, topic: str, start_time: int, end_time: int, limit: int=10, offset: int=0):
+        assert self.connected
+        # This is not at all efficient, but should not be used for serious amounts of data
+        results = []
+        for record in sorted(self.data.values(), key=lambda r: r.timestamp):
+            if record.topic == topic and \
+              record.timestamp >= start_time and record.timestamp < end_time:
+                if offset > 0:
+                    offset -= 1
+                else:
+                    results.append(record)
+                    if limit!=0 and len(results) == limit:
+                        return results
+        return results
 
 class SQL_db(Base_db):
     def __init__(self, config):
         # allow some of these things to be None as a subclass may have its own ways of setting them
         super().__init__(config)
-        self.user_name = config.get("db_user", None)
+        self.user_name = config.get("db_username", None)
         self.db_name   = config.get("db_name", None)
         self.password  = os.environ.get("DB_PASSWORD", None)
         self.host      = config.get("db_host", None)
@@ -176,9 +264,9 @@ class SQL_db(Base_db):
 
     async def connect(self):
         "create  a session to postgres"
-        if not self.password:   
+        if self.password is None:
             raise RuntimeError("SQL database password was not configured")
-        if not self.host:   
+        if self.host is None:
             raise RuntimeError("SQL database host was not configured")
         self.pool = await aiopg.create_pool(
             dbname  = self.db_name,
@@ -219,7 +307,7 @@ class SQL_db(Base_db):
         with (await self.pool.cursor()) as cur:
             await cur.execute(sql)
 
-    async def insert(self, payload, metadata, annotations):
+    async def insert(self, metadata, annotations):
         "insert one record into the DB"
         if self.read_only:
             raise RuntimeError("This database object is set to read-only; insert is forbidden")
@@ -305,7 +393,7 @@ class SQL_db(Base_db):
             await cur.execute(sql)
             result = await cur.fetchall()
             return result[0][0] != 0
-    
+
     async def get_client_uuid_duplicates(self, limit: int = 1):
         """
         list UUIDs that are duplicates of an original UUID
@@ -325,27 +413,24 @@ class SQL_db(Base_db):
              uuid
             HAVING
              count(*) > 1
-            LIMIT {args["limit"]}
+            LIMIT {limit}
         """
         return await self._query(sql_client_side)
 
-    async def get_server_uuid_duplicates(self, limit: int = 1):
+    async def get_content_duplicates(self, limit: int = 1):
         """
-        list UUIDs that are duplicates of an original UUID
-    
-        This routine detects messages having UUIDs
-        generated on the archive_ingest.py _server_.
+        List messages which are probably duplicated based on their content checksums
         """
         sql_server_side = f"""
            SELECT
-             max(id), topic, size, timestamp, count(*)
+             max(id), topic, timestamp, message_crc32, count(*)
             FROM
              messages
             GROUP By
-             topic, size, timestamp
+             topic, timestamp, message_crc32
             HAVING
              count(*) > 1
-            LIMIT {args["limit"]}
+            LIMIT {limit}
         """
         return await self._query(sql_server_side)
 
@@ -353,7 +438,7 @@ class SQL_db(Base_db):
         """
         Configure this database object to only perform reads, rejecting all modification operations.
         """
-        super().set_read_only()
+        await super().set_read_only()
         with (await self.pool.cursor()) as cur:
             await cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;")
 
@@ -365,19 +450,29 @@ class SQL_db(Base_db):
         print (cmd)
         subprocess.run(cmd, shell=True)
 
-    def make_readonly_user(self):
+    async def get_message_id(self, uuid):
         """
-        tested model SQL -- not implemented, though
-        CREATE USER test_ro_user WITH PASSWORD ‘skjfdkjfd’;
-        GRANT CONNECT ON DATABASE housekeeping TO test_ro_user ;
-        GRANT USAGE ON SCHEMA public TO test_ro_user;
-        GRANT SELECT ON ALL TABLES IN SCHEMA public TO test_ro_user;
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO test_ro_user;
-        REVOKE CREATE ON SCHEMA public FROM test_ro_user;
+        Get the primary key associated with a message with the given UUID.
+        This is a low-level interface intended mainly for testing.
+        If duplicate UUIDs have gotten into the database, this will return
+        only the id for one of them.
         """
-        pass #not implemented this version
-    
-    async def get_message_locations(ids):
+        sql = f"""
+           SELECT
+            id
+           FROM
+            messages
+           WHERE
+            uuid = '{uuid}'
+        """
+        with (await self.pool.cursor()) as cur:
+            await cur.execute(sql)
+            result = await cur.fetchall()
+            if len(result) > 0:
+                return result[0][0]
+            return None
+
+    async def get_message_locations(self, ids):
         """
         Get the location in the store of each of a set of messages spcified by
         UUID.
@@ -385,8 +480,9 @@ class SQL_db(Base_db):
         Return: A sequence of tuples of bucket name, key where each mesage can
                 be found in the data store.
         """
-        list_text = "(" + ids.join(",")  + ")"
+        list_text = "(" + ",".join([f"'{id}'" for id in ids]) + ")"
         sql = f"select bucket, key from messages where id in {list_text}"
+        print("Query string:", sql)
         return await self._query(sql)
 
     async def get_message_records_for_time_range(self, topic: str, start_time: int, end_time: int, limit: int=10, offset: int=0):

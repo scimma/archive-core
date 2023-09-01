@@ -36,8 +36,7 @@ def StoreFactory(config):
     #instantiate, then return db object of correct type.
     if type == "mock" : return Mock_store(config)
     if type == "S3"   : return S3_store  (config)
-    logging.fatal(f"store {type} not supported")
-    exit(1)
+    raise RuntimeError(f"store {type} not supported")
 
 
 def add_parser_options(parser):
@@ -69,15 +68,9 @@ class Base_store:
             self.aws_access_key_id= ''
             self.aws_secret_access_key= ''
         self.n_stored = 0
-        self.log_every = config["store_log_every"]
+        self.log_every = config.get("store_log_every",100)
         self.read_only = False
         self.config = config
-
-    def connect(self):
-        pass
-
-    def close(self):
-        pass
 
     def log(self, annotations):
         "log storage informmation, but not too often"
@@ -87,7 +80,7 @@ class Base_store:
             logging.info(msg1)
             logging.info(msg2)
 
-    def set_read_only(self):
+    async def set_read_only(self):
         """
         Configure this stroage object to only perform reads, rejecting all
         modification operations.
@@ -127,7 +120,7 @@ class Base_store:
         "if not overriden, print error and die"
         raise NotImplementedError
 
-    def deep_delete(self, bucket, key):
+    def deep_delete_object_from_store(self, key):
         "if not overriden, print error and die"
         raise NotImplementedError
 
@@ -184,48 +177,54 @@ class S3_store(Base_store):
         self.log(annotations)
         return
 
-    async def deep_delete_object_from_store(self, key):
-        """
-        delete all corresponding objects  from all S3 archive
-        including versions and delete markers.
-        right now assert that buckets contian
-        'devel' as part fo their name out of paranoia
-       """
-        if self.read_only:
-            raise RuntimeError("This store object is set to read-only; "
-                               "deep_delete_object_from_store is forbidden")
-        await self.deep_delete_object(self.primary_bucket, key)
-        await self.deep_delete_object(self.backup_bucket, key)
-
-    async def deep_delete_object(self, bucket_name, key):
-        """
-        delete all contents related to object from the S3
-        bucket.
-        right now assert that bucket contain the string
-        'devel' as part of its name out of paranoia
-        """
-        if self.read_only:
-            raise RuntimeError("This store object is set to read-only; "
-                               "deep_delete_object is forbidden")
-
-        assert "mock" in key or "archive-ingest-test" or "cmb-s4-fabric-tests.housekeeping-test" in key
-        bucket = await self.client.Bucket(bucket_name)
-        await bucket.object_versions.filter(Prefix=key).delete()
+# TODO: These implementations do not work. Deletion is also a rare task, so fixing them is deferred.
+#     async def deep_delete_object_from_store(self, key):
+#         """
+#         delete all corresponding objects  from all S3 archive
+#         including versions and delete markers.
+#        """
+#         if self.read_only:
+#             raise RuntimeError("This store object is set to read-only; "
+#                                "deep_delete_object_from_store is forbidden")
+#         await self.deep_delete_object(self.primary_bucket, key)
+#         await self.deep_delete_object(self.backup_bucket, key)
+# 
+#     async def deep_delete_object(self, bucket_name, key):
+#         """
+#         delete all contents related to object from the S3
+#         bucket.
+#         """
+#         if self.read_only:
+#             raise RuntimeError("This store object is set to read-only; "
+#                                "deep_delete_object is forbidden")
+# 
+#         bucket = await self.client.Bucket(bucket_name)
+#         await bucket.object_versions.filter(Prefix=key).delete()
 
     async def get_object_lazily(self, key):
         """
         Fetch an object from S3, directly returning the S3 response object,
         allowing uses like streaming the object data.
         """
-        response = await self.client.get_object(
-            Bucket=self.primary_bucket,
-            Key=key)
-        return response
+        try:
+            response = await self.client.get_object(
+                Bucket=self.primary_bucket,
+                Key=key)
+            return response
+        except botocore.errorfactory.ClientError as err:
+            if "NoSuchKey" in err.__repr__() : return None
+            raise
 
     async def get_object(self, key):
         "return oject from S3"
-        response = await self.get_object_raw(key)
-        data = response['Body'].read()
+        try:
+            response = await self.client.get_object(
+                Bucket=self.primary_bucket,
+                Key=key)
+        except botocore.errorfactory.ClientError as err:
+            if "NoSuchKey" in err.__repr__() : return None
+            raise
+        data = await response['Body'].read()
         return data
 
     async def get_object_summary(self, key):
@@ -236,7 +235,7 @@ class S3_store(Base_store):
                 Bucket=self.primary_bucket,
                 Key=key)
 
-        except  botocore.errorfactory.ClientError as err:
+        except botocore.errorfactory.ClientError as err:
             # Its important to differentiate between this
             # error and any other BOTO error.
             #
@@ -255,26 +254,26 @@ class S3_store(Base_store):
         summary["size"] = size
         return summary
 
-    
-    async def list_object_versions(self, prefix):
-        """ list all onecht verision under prefix"""
-        my_bucket = await self.client.Bucket('self.primary_bucket')
-        async for object in my_bucket.objects.all():
-            print(object.key)
-        """    
-        paginator = client.get_paginator('list_objects')
-        result = paginator.paginate(Bucket=self.primary_bucket
-                                    , Delimiter=prefix)
-        for prefix in result.search('CommonPrefixes'):
-            print(prefix.get('Prefix'))
-        return
-        objectXSXCs = list(bucket.objects.filter(Prefix=prefix))
-        for object in objects:
-            for result in self.client.list_object_versions(
-                Bucket=self.primary_bucket,
-                Prefix=path_prefix):
-            yield result
-        """
+# TODO: implementation incomplete    
+#     async def list_object_versions(self, prefix):
+#         """ list all onecht verision under prefix"""
+#         my_bucket = await self.client.Bucket('self.primary_bucket')
+#         async for object in my_bucket.objects.all():
+#             print(object.key)
+#         """    
+#         paginator = client.get_paginator('list_objects')
+#         result = paginator.paginate(Bucket=self.primary_bucket
+#                                     , Delimiter=prefix)
+#         for prefix in result.search('CommonPrefixes'):
+#             print(prefix.get('Prefix'))
+#         return
+#         objectXSXCs = list(bucket.objects.filter(Prefix=prefix))
+#         for object in objects:
+#             for result in self.client.list_object_versions(
+#                 Bucket=self.primary_bucket,
+#                 Prefix=path_prefix):
+#             yield result
+#         """
 
     
 class Mock_store(Base_store):
@@ -284,17 +283,74 @@ class Mock_store(Base_store):
 
     def __init__(self, config):
         super().__init__(config)
+        self.buckets = {}
+        self.connected = False
         logging.info(f"Mock store configured")
 
+    async def connect(self):
+        self.connected = True
 
-    def store(self, payload, metadata, annotations):
-        "mock operation of storing in s3"
+    async def close(self):
+        self.connected = False
+
+    async def store(self, payload, metadata, annotations):
+        """place data, metadata as an object in S3"""
         if self.read_only:
             raise RuntimeError("This store object is set to read-only; store is forbidden")
-        self.n_stored += 1
+        assert self.connected
+
+        bucket = self.primary_bucket
+        if not bucket in self.buckets:
+            self.buckets[bucket] = {}
+        
         key = self.get_key(metadata, annotations["con_text_uuid"])
         b = self.get_as_bson(payload, metadata, annotations)
         size = len(b)
         crc32 = zlib.crc32(b)
+        self.buckets[bucket][key] = b
+        
+        self.n_stored += 1
         self.set_storeinfo(annotations, key, size, crc32)
         self.log(annotations)
+
+    async def deep_delete_object_from_store(self, key):
+        if self.read_only:
+            raise RuntimeError("This store object is set to read-only; "
+                               "deep_delete_object_from_store is forbidden")
+        assert self.connected
+        await self.deep_delete_object(self.primary_bucket, key)
+        await self.deep_delete_object(self.backup_bucket, key)
+
+    async def deep_delete_object(self, bucket, key):
+        if self.read_only:
+            raise RuntimeError("This store object is set to read-only; "
+                               "deep_delete_object is forbidden")
+        assert self.connected
+        if bucket in self.buckets and key in self.buckets[bucket]:
+            del self.buckets[bucket][key]
+
+    async def get_object(self, key):
+        assert self.connected
+        if key in self.buckets[self.primary_bucket]:
+            return self.buckets[self.primary_bucket][key]
+        return None
+    
+    class LazyObject:
+        def __init__(self, obj):
+            self.obj = obj
+        def read(self):
+            return self.obj
+
+    async def get_object_lazily(self, key):
+        assert self.connected
+        if key in self.buckets[self.primary_bucket]:
+            return self.LazyObject(self.buckets[self.primary_bucket][key])
+        return None
+
+    async def get_object_summary(self, key):
+        assert self.connected
+        summary = {"exists" : False}
+        if self.primary_bucket in self.buckets and key in self.buckets[self.primary_bucket]:
+            summary["exists"] = True
+            summary["size"] = len(self.buckets[self.primary_bucket][key])
+        return summary

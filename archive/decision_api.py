@@ -20,19 +20,18 @@ This moodule supports
 # Batch decisions routines
 #################
 
+import bson
 import logging
 import uuid
 import zlib
 
 
-def is_content_identical(ids, db, store):
+async def is_content_identical(ids, db, store):
     "ensure that messages have the same content"
-    import zlib
-    import bson
     contents = []
-    locations = db.get_message_locations(ids)
+    locations = await db.get_message_locations(ids)
     for bucket, key in locations:
-        content = bson.loads(store.get(key))
+        content = bson.loads(await store.get_object(key))
         contents.append(content)
     crc_set = {zlib.crc32(c["message"]["content"]) for c in contents}
     return len(crc_set) == 1
@@ -55,7 +54,7 @@ def get_text_uuid(headers):
 		try:
 			binary_uuid = _id[1]
 			return (str(uuid.UUID(bytes=binary_uuid)), True)
-		except (ValueError, IndexError, TypeError) :
+		except (ValueError, IndexError, TypeError):
 			continue
 	#nothing there; so make one up.
 	text_uuid = str(uuid.uuid4())

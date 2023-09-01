@@ -38,7 +38,7 @@ class Archive_access():
         await self.store.connect()
         if self.read_only:
             await self.db.set_read_only()
-            self.store.set_read_only()
+            await self.store.set_read_only()
 
     async def close(self):
         await self.db.close()
@@ -66,6 +66,8 @@ class Archive_access():
     async def get_all(self, key):
         "get message and all retained metadata (includes header)"
         bundle = await self.get_raw_object(key)
+        if bundle is None:
+            return None
         bundle =  bson.loads(bundle)
         message = bundle["message"]["content"]
         metadata = bundle["metadata"]
@@ -73,18 +75,21 @@ class Archive_access():
 
     async def get_as_sent(self, key):
         "get message and header as sent to kafka"
-        message, metadata = await self.get_all(key)
+        record = await self.get_all(key)
+        if record is None:
+            return record
+        message, metadata = record
         return (message, metadata["headers"])
 
     async def get_object_summary(self, key):
         "check if object is present, and return size if so"
-        return await self.store_get_object_summary()
+        return await self.store.get_object_summary(key)
 
     async def store_message(self, payload, metadata):
         annotations = decision_api.get_annotations(payload, metadata.headers)
         if await decision_api.is_deemed_duplicate(annotations, metadata, self.db, self.store):
             logging.info(f"Duplicate not stored {annotations}")
-            return (False,"Message with duplictae UUID not stored")
+            return (False,"Message with duplicate UUID not stored")
         await self.store.store(payload, metadata, annotations)
-        await self.db.insert(payload, metadata, annotations)
+        await self.db.insert(metadata, annotations)
         return (True,"")
