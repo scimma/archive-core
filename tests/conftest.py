@@ -95,10 +95,10 @@ class NativePostgresServer(PostgresServer):
 			"max_wal_size": "320MB",
 			"log_timezone": "UTC",
 			"datestyle": "'iso, mdy'",
-			"lc_messages": "'en_US.UTF-8'",
-			"lc_monetary": "'en_US.UTF-8'",
-			"lc_numeric": "'en_US.UTF-8'",
-			"lc_time": "'en_US.UTF-8'",
+			"lc_messages": "'C'",
+			"lc_monetary": "'C'",
+			"lc_numeric": "'C'",
+			"lc_time": "'C'",
 			"default_text_search_config": "'pg_catalog.english'",
 		}
 		defaults.update(kwargs)
