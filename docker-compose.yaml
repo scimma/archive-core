@@ -4,71 +4,12 @@ networks:
   internal:
     external: false
 
-volumes:
-  waitforit: {}
-  # dbdata: {}
-  # objectstoredata: {}
-
 services:
-  ## 
-  ## MinIO: S3-compatible object store for archived message data
-  ##
-  # object-store:
-  #   image: quay.io/minio/minio:RELEASE.2023-01-31T02-24-19Z
-  #   container_name: archive-object-store
-  #   env_file: .env
-  #   ports:
-  #     - 127.0.0.1:9000:9000
-  #     - 127.0.0.1:9001:9001
-  #   networks:
-  #     - internal
-  #   command:
-  #   - server
-  #   - /data
-  #   - --console-address
-  #   - ":9001"
-  #   volumes:
-  #     - objectstoredata:/data
-  ## 
-  ## Archive database
-  ##
-  # archive-db:
-  #   image: bitnami/postgresql:latest
-  #   container_name: archive-db
-  #   env_file: .env
-  #   networks:
-  #     - internal
-  #   volumes:
-  #     - dbdata:/bitnami/postgresql
-  ## 
-  ## Archiver initialization: Semaphore to await Archive database availability
-  ##
-  # archiver-init-db:
-  #   image: bitnami/postgresql:latest
-  #   container_name: archive-db-init
-  #   env_file: .env
-  #   depends_on:
-  #     - archive-db
-  #   networks:
-  #     - internal
-  #   command:
-  #     - sh
-  #     - -c
-  #     - >
-  #       until pg_isready \
-  #           --host=archive-db \
-  #           --port=5432;
-  #         do echo waiting for database;
-  #         sleep 2;
-  #         done;
-  #         touch /tmp/db_ready;
-  #   volumes:
-  #     - waitforit:/tmp
   ## 
   ## Archiver
   ##
   archiver:
-    image: archive-core:latest
+    image: archive-core:dev
     build:
       context: .
       dockerfile: ./docker/Dockerfile
@@ -80,10 +21,3 @@ services:
       - '/bin/bash'
       - '-c'
       - make test
-      # - >
-      #   while [[ ! -f /tmp/db_ready ]]; do
-      #     echo waiting for db_ready...;
-      #     sleep 2;
-      #   done;
-    volumes:
-      - waitforit:/tmp
