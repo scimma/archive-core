@@ -17,10 +17,12 @@ extention to SQLite.
 
 """
 
-import psycopg2
 import boto3
 from botocore.exceptions import ClientError
-import aiopg
+import sqlalchemy
+from sqlalchemy.ext.asyncio import create_async_engine, create_async_pool_from_url
+import psycopg
+from psycopg_pool import AsyncConnectionPool
 import aioboto3
 import logging
 from collections import namedtuple
@@ -53,6 +55,7 @@ def add_parser_options(parser):
     parser.add_argument("--db-log-frequency", help="How often (in number of inserts) to log database insertions", type=int, action=EnvDefault, envvar="DB_LOG_FREQUENCY", default=100, required=False)
     parser.add_argument("--db-aws-secret-name", help="Name of an AWS secret from which to read database connection info", type=str, action=EnvDefault, envvar="DB_AWS_SECRET_NAME", required=False)
     parser.add_argument("--db-aws-region", help="Name of the AWS region in which to look for the database and AWS secret", type=str, action=EnvDefault, envvar="DB_AWS_REGION", default="us-west-2", required=False)
+    parser.add_argument("--db-table", help="Name of the table for message metadata", type=str, action=EnvDefault, envvar="DB_TABLE", default="messages", required=False)
 
 
 class Base_db:
@@ -85,9 +88,9 @@ class Base_db:
         raise NotImplementedError
 
     MessageRecord = namedtuple("MessageRecord",
-                               ["topic", "timestamp", "uuid", "size", "key", 
-                                "bucket", "crc32", "is_client_uuid", 
-                                "message_crc32"])
+                               ["id", "topic", "timestamp", "uuid", "size", "key",
+                                "bucket", "crc32", "is_client_uuid", "public",
+                                "direct_upload", "message_crc32"])
 
     async def fetch(self, uuid) -> MessageRecord:
         raise NotImplementedError
@@ -170,17 +173,20 @@ class Mock_db(Base_db):
         assert self.connected
         
         value = Base_db.MessageRecord(
-                  metadata.topic,
-                  metadata.timestamp,
-                  annotations['con_text_uuid'],
-                  annotations['size'],
-                  annotations['key'],
-                  annotations['bucket'],
-                  annotations['crc32'],
-                  annotations['con_is_client_uuid'],
-                  annotations['con_message_crc32']
+                  id = self.next_id,
+                  topic = metadata.topic,
+                  timestamp = metadata.timestamp,
+                  uuid = annotations['con_text_uuid'],
+                  size = annotations['size'],
+                  key = annotations['key'],
+                  bucket = annotations['bucket'],
+                  crc32 = annotations['crc32'],
+                  is_client_uuid = annotations['con_is_client_uuid'],
+                  public = annotations['public'],
+                  direct_upload = annotations['direct_upload'],
+                  message_crc32 = annotations['con_message_crc32']
                   )
-        self.data[self.next_id] = value
+        self.data[value.id] = value
         self.next_id += 1
 
     async def fetch(self, uuid) -> Base_db.MessageRecord:
@@ -261,6 +267,7 @@ class SQL_db(Base_db):
         self.host      = config.get("db_host", None)
         self.port      = config.get("db_port", 5432)
         self.maxconn   = config.get("db_pool_size", 16)
+        self.table_name = config.get("db_table", "messages")
 
     async def connect(self):
         "create  a session to postgres"
@@ -268,67 +275,68 @@ class SQL_db(Base_db):
             raise RuntimeError("SQL database password was not configured")
         if self.host is None:
             raise RuntimeError("SQL database host was not configured")
-        self.pool = await aiopg.create_pool(
-            dbname  = self.db_name,
-            user    = self.user_name,
-            password = self.password,
-            host     = self.host,
-            port     = self.port,
-            minsize  = 1,
-            maxsize  = self.maxconn
+        self.engine = create_async_engine(
+            url=f"postgresql+psycopg://{self.user_name}:{self.password}@{self.host}:{self.port}/{self.db_name}",
+            pool_size  = self.maxconn,
+        )
+        self.db_meta = sqlalchemy.MetaData()
+        Column = sqlalchemy.Column
+        self.table = sqlalchemy.Table(
+            self.table_name,
+            self.db_meta,
+            Column("id", sqlalchemy.dialects.postgresql.BIGINT, primary_key=True),
+            Column("topic", sqlalchemy.dialects.postgresql.TEXT),
+            Column("timestamp", sqlalchemy.dialects.postgresql.BIGINT),
+            Column("uuid", sqlalchemy.dialects.postgresql.UUID),
+            Column("size", sqlalchemy.dialects.postgresql.INTEGER),
+            Column("key", sqlalchemy.dialects.postgresql.TEXT),
+            Column("bucket", sqlalchemy.dialects.postgresql.TEXT),
+            Column("crc32", sqlalchemy.dialects.postgresql.BIGINT),
+            Column("is_client_uuid", sqlalchemy.dialects.postgresql.BOOLEAN),
+            Column("public", sqlalchemy.dialects.postgresql.BOOLEAN),
+            Column("direct_upload", sqlalchemy.dialects.postgresql.BOOLEAN),
+            Column("message_crc32", sqlalchemy.dialects.postgresql.BIGINT),
         )
 
     async def close(self):
-        self.pool.close()
-        await self.pool.wait_closed()
+        await self.engine.dispose()
 
     async def make_schema(self):
         "Declare tables"
-        sql =  """
-        CREATE TABLE IF NOT EXISTS
-        messages(
-          id  BIGSERIAL  PRIMARY KEY,
-          topic          TEXT,
-          timestamp      BIGINT,
-          uuid           TEXT,
-          size           INTEGER,
-          key            TEXT,
-          bucket         TEXT,
-          crc32          BIGINT,
-          is_client_uuid BOOLEAN,
-          message_crc32  BIGINT
-        );
-
-        CREATE INDEX IF NOT EXISTS timestamp_idx ON messages (timestamp);
-        CREATE INDEX IF NOT EXISTS topic_idx     ON messages (topic);
-        CREATE INDEX IF NOT EXISTS key_idx       ON messages (key);
-        CREATE INDEX IF NOT EXISTS uuid_idx      ON messages (uuid);
-        """
-        with (await self.pool.cursor()) as cur:
-            await cur.execute(sql)
+        ts_idx = sqlalchemy.Index(f"{self.table_name}_timestamp_idx", self.table.c.timestamp)
+        topic_idx = sqlalchemy.Index(f"{self.table_name}_topic_idx", self.table.c.topic)
+        key_idx = sqlalchemy.Index(f"{self.table_name}_key_idx", self.table.c.key)
+        uuid_idx = sqlalchemy.Index(f"{self.table_name}_uuid_idx", self.table.c.uuid)
+        async with self.engine.connect() as conn:
+            await conn.execute(sqlalchemy.sql.ddl.CreateTable(self.table, if_not_exists=True))
+            await conn.execute(sqlalchemy.sql.ddl.CreateIndex(ts_idx, if_not_exists=True))
+            await conn.execute(sqlalchemy.sql.ddl.CreateIndex(topic_idx, if_not_exists=True))
+            await conn.execute(sqlalchemy.sql.ddl.CreateIndex(key_idx, if_not_exists=True))
+            await conn.execute(sqlalchemy.sql.ddl.CreateIndex(uuid_idx, if_not_exists=True))
+            await conn.commit()
 
     async def insert(self, metadata, annotations):
         "insert one record into the DB"
         if self.read_only:
             raise RuntimeError("This database object is set to read-only; insert is forbidden")
 
-        sql = f"""
-        INSERT INTO messages
-          (topic, timestamp, uuid, size, key, bucket, crc32, is_client_uuid, message_crc32)
-          VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ;
-        COMMIT ; """
-        values = [metadata.topic,
-                  metadata.timestamp,
-                  annotations['con_text_uuid'],
-                  annotations['size'],
-                  annotations['key'],
-                  annotations['bucket'],
-                  annotations['crc32'],
-                  annotations['con_is_client_uuid'],
-                  annotations['con_message_crc32']
-                  ]
-        with (await self.pool.cursor()) as cur:
-            await cur.execute(sql,values)
+        async with self.engine.connect() as conn:
+            await conn.execute(
+                self.table.insert().values(
+                    topic = metadata.topic,
+                    timestamp = metadata.timestamp,
+                    uuid = annotations['con_text_uuid'],
+                    size = annotations['size'],
+                    key = annotations['key'],
+                    bucket = annotations['bucket'],
+                    crc32 = annotations['crc32'],
+                    is_client_uuid = annotations['con_is_client_uuid'],
+                    public = annotations['public'],
+                    direct_upload = annotations['direct_upload'],
+                    message_crc32 = annotations['con_message_crc32'],
+                )
+            )
+            await conn.commit()
         self.n_inserted +=1
         self.log()
 
@@ -339,60 +347,33 @@ class SQL_db(Base_db):
         Returns: A tuple of all entries in the database row, or None if no
                  matching row was found.
         """
-        query = f"SELECT * FROM messages WHERE uuid='{str(uuid)}';"
-        with (await self.pool.cursor()) as cur:
-            await cur.execute(query)
-            if cur.rowcount == 0:
+        async with self.engine.connect() as conn:
+            result = await conn.execute(self.table.select().where(self.table.c.uuid == uuid))
+            record = result.first()
+            if record is None:
                 return None
-            record = await cur.fetchone()
-            return Base_db.MessageRecord(*record[1:])
-
-    async def _query(self, sql, expect_results=True):
-        "execute SQL, return results if expected"
-        with (await self.pool.cursor()) as cur:
-            await cur.execute(sql)
-            if expect_results:
-                results = await cur.fetchall()
-                return results
+            return Base_db.MessageRecord(**record._mapping)
 
     async def uuid_in_db(self, uuid):
         """
         Determine if this UUID is in the database
         """
-        sql = f"""
-           SELECT
-            count(*)
-           FROM
-            messages
-           WHERE
-            uuid = '{uuid}'
-        """
-        with (await self.pool.cursor()) as cur:
-            await cur.execute(sql)
-            result = await cur.fetchall()
-            return result[0][0] != 0
+        async with self.engine.connect() as conn:
+            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.count()).select_from(self.table).where(self.table.c.uuid == uuid))
+            return result.scalar() or False
 
     async def exists_in_db(self, topic, timestamp, message_crc32):
         """
         Check whether a message with the given CRC sent at the given timestamp
         has previously been seen on the given topic.
         """
-        sql = f"""
-        SELECT
-           count(*)
-        FROM
-           messages
-        WHERE
-          timestamp = {timestamp}
-          AND
-          topic = '{topic}'
-          AND
-          message_crc32 = '{message_crc32}'
-        """
-        with (await self.pool.cursor()) as cur:
-            await cur.execute(sql)
-            result = await cur.fetchall()
-            return result[0][0] != 0
+        async with self.engine.connect() as conn:
+            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.count())\
+                                        .select_from(self.table)\
+                                        .where((self.table.c.timestamp == timestamp) &
+                                               (self.table.c.topic == topic) &
+                                               (self.table.c.message_crc32 == message_crc32)))
+            return result.scalar() or False
 
     async def get_client_uuid_duplicates(self, limit: int = 1):
         """
@@ -404,43 +385,41 @@ class SQL_db(Base_db):
         only one duplicate UUID is returned.
     
         """
-        sql_client_side = f"""
-           SELECT
-             max(id), uuid, count(*)
-            FROM
-             messages
-            GROUP By
-             uuid
-            HAVING
-             count(*) > 1
-            LIMIT {limit}
-        """
-        return await self._query(sql_client_side)
+        async with self.engine.connect() as conn:
+            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.max(self.table.c.id),
+                                                          self.table.c.uuid,
+                                                          sqlalchemy.func.count())
+                                        .select_from(self.table)
+                                        .group_by(self.table.c.uuid)
+                                        .having(sqlalchemy.func.count() > 1)
+                                        .limit(limit)
+                                        )
+            return result.all()
 
     async def get_content_duplicates(self, limit: int = 1):
         """
         List messages which are probably duplicated based on their content checksums
         """
-        sql_server_side = f"""
-           SELECT
-             max(id), topic, timestamp, message_crc32, count(*)
-            FROM
-             messages
-            GROUP By
-             topic, timestamp, message_crc32
-            HAVING
-             count(*) > 1
-            LIMIT {limit}
-        """
-        return await self._query(sql_server_side)
+        async with self.engine.connect() as conn:
+            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.max(self.table.c.id),
+                                                          self.table.c.topic,
+                                                          self.table.c.timestamp,
+                                                          self.table.c.message_crc32,
+                                                          sqlalchemy.func.count())
+                                        .select_from(self.table)
+                                        .group_by(self.table.c.topic,
+                                                  self.table.c.timestamp,
+                                                  self.table.c.message_crc32)
+                                        .having(sqlalchemy.func.count() > 1)
+                                        .limit(limit)
+                                        )
+            return result.all()
 
     async def set_read_only(self):
         """
         Configure this database object to only perform reads, rejecting all modification operations.
         """
         await super().set_read_only()
-        with (await self.pool.cursor()) as cur:
-            await cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;")
 
     def launch_db_session(self):
         "lauch a query_session tool for AWS databases"
@@ -457,51 +436,34 @@ class SQL_db(Base_db):
         If duplicate UUIDs have gotten into the database, this will return
         only the id for one of them.
         """
-        sql = f"""
-           SELECT
-            id
-           FROM
-            messages
-           WHERE
-            uuid = '{uuid}'
-        """
-        with (await self.pool.cursor()) as cur:
-            await cur.execute(sql)
-            result = await cur.fetchall()
-            if len(result) > 0:
-                return result[0][0]
-            return None
+        async with self.engine.connect() as conn:
+            result = await conn.execute(sqlalchemy.select(self.table.c.id)\
+                                        .select_from(self.table)\
+                                        .where(self.table.c.uuid == uuid))
+            return result.scalar()
 
     async def get_message_locations(self, ids):
         """
-        Get the location in the store of each of a set of messages spcified by
+        Get the location in the store of each of a set of messages specified by
         UUID.
         
         Return: A sequence of tuples of bucket name, key where each mesage can
                 be found in the data store.
         """
-        list_text = "(" + ",".join([f"'{id}'" for id in ids]) + ")"
-        sql = f"select bucket, key from messages where id in {list_text}"
-        print("Query string:", sql)
-        return await self._query(sql)
+        async with self.engine.connect() as conn:
+            result = await conn.execute(sqlalchemy.select(self.table.c.bucket, self.table.c.key)\
+                                        .select_from(self.table)\
+                                        .where(self.table.c.id.in_(ids)))
+            return result.all()
 
     async def get_message_records_for_time_range(self, topic: str, start_time: int, end_time: int, limit: int=10, offset: int=0):
-        query = f"""
-        SELECT * 
-        FROM messages 
-        WHERE
-         topic='{topic}' AND
-         timestamp>='{start_time}' AND
-         timestamp<'{end_time}'
-        ORDER BY timestamp
-        LIMIT {limit}
-        OFFSET {offset}
-        ;
-        """
-        with (await self.pool.cursor()) as cur:
-            await cur.execute(query)
-            result = await cur.fetchall()
-            return [Base_db.MessageRecord(*record[1:]) for record in result]
+        async with self.engine.connect() as conn:
+            result = await conn.execute(self.table.select()\
+                                        .where((self.table.c.topic == topic) &
+                                               (self.table.c.timestamp >= start_time) &
+                                               (self.table.c.timestamp < end_time))
+                                        .limit(limit).offset(offset))
+            return [Base_db.MessageRecord(**record._mapping) for record in result.all()]
 
 
 class AWS_db(SQL_db):

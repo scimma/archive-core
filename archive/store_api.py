@@ -104,6 +104,7 @@ class Base_store:
         "return a blob of bson"
         simplified_metadata = {"timestamp" : metadata.timestamp,
                                "headers" : metadata.headers,
+                               "key": metadata.key,
                                "topic" : metadata.topic
                               }
         ret = bson.dumps({"message" : payload,

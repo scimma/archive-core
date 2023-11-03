@@ -8,14 +8,15 @@ description = "Core implementation of the Hopskotch Archive"
 requires-python = ">=3.6"
 dependencies = [
     "aioboto3",
-    "aiopg",
     "bson",
     "cython<3 ; python_version < '3.8'", # need this to work around https://github.com/fastavro/fastavro/issues/701
     "fastapi",
     "fastavro~=1.7.0 ; python_version < '3.8'", # need this to work around https://github.com/fastavro/fastavro/issues/701
     "hop-client",
     "httpx",
-    "psycopg2-binary",
+    "psycopg[binary]",
+    "psycopg_pool",
+    "sqlalchemy",
     "toml",
     "uvicorn[standard]",
 ]
