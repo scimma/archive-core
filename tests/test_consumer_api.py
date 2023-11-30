@@ -191,12 +191,12 @@ def test_hop_consumer_refresh_url(tmpdir):
 		time.time.adv_time(hc.refresh_interval)
 		assert not hc.refresh_url(), "Refresh should do nothing when topics have not changed"
 
-class MockMessage:
-	def __init__(self, data: bytes):
-		self.data = data
-	
-	def serialize(self):
-		return {"format": "dummy", "content": self.data}
+# class MockMessage:
+# 	def __init__(self, data: bytes):
+# 		self.data = data
+# 	
+# 	def serialize(self):
+# 		return self.data
 
 class MockHopClient:
 	def __init__(self, url_base, topics: TopicLister):
@@ -206,7 +206,7 @@ class MockHopClient:
 		self.was_closed = False
 		self.marked_done = set()
 	
-	def read(self, metadata: bool, autocommit: bool):
+	def read_raw(self, metadata: bool, autocommit: bool):
 		assert metadata
 		assert not autocommit
 		return self
@@ -259,8 +259,8 @@ def test_hop_consumer_get_next(tmpdir):
 	config = get_consumer_test_config()
 	topics = TopicLister(["t1", "t2"])
 	kafka = MockHopClient("kafka://example.com:9092/",topics)
-	kafka.queue_message((MockMessage(b"data"), Metadata("t1", 0, 0 , 123, "", [], None)))
-	kafka.queue_message((MockMessage(b"atad"), Metadata("t1", 0, 0 , 254, "", [], None)))
+	kafka.queue_message((b"data", Metadata("t1", 0, 0 , 123, "", [], None)))
+	kafka.queue_message((b"atad", Metadata("t1", 0, 0 , 254, "", [], None)))
 	with temp_environ(HOP_PASSWORD="test-pass"), \
 	     mock.patch('time.time', MockClock(0)), \
 	     mock.patch('archive.consumer_api.list_topics', topics), \
@@ -272,7 +272,7 @@ def test_hop_consumer_get_next(tmpdir):
 		time.time.adv_time(hc.refresh_interval)
 		iterator = hc.get_next()
 		payload, metadata = iterator.__next__()
-		assert payload["content"] == b"data"
+		assert payload == b"data"
 		assert metadata.topic == "t1"
 		assert metadata.timestamp == 123
 		assert not kafka.was_closed
@@ -283,7 +283,7 @@ def test_hop_consumer_get_next(tmpdir):
 		consumer_api.list_topics.set_topics(["t1","t3"])
 		time.time.adv_time(hc.refresh_interval)
 		payload, metadata = iterator.__next__()
-		assert payload["content"] == b"atad"
+		assert payload == b"atad"
 		assert metadata.topic == "t1"
 		assert metadata.timestamp == 254
 		assert kafka.was_closed
@@ -315,10 +315,10 @@ def test_Mock_consumer():
 		output.append((message, metadata))
 		
 	assert len(output) == 2
-	assert output[0][0]["content"] == b"data"
+	assert output[0][0] == b"data"
 	assert output[0][1].topic == "t1"
 	assert output[0][1].timestamp == 123
-	assert output[1][0]["content"] == b"atad"
+	assert output[1][0] == b"atad"
 	assert output[1][1].topic == "t1"
 	assert output[1][1].timestamp == 254
 	

@@ -62,7 +62,7 @@ async def test_archive_access_store_message():
     await aa.connect()
     
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
     r = await aa.store_message(message, metadata)
     assert r[0], "Insertion should succeed"
@@ -75,7 +75,7 @@ async def test_archive_access_store_message():
     sr = await aa.store.get_object(dr.key)
     assert sr is not None, "Message should be in data store"
     data = bson.loads(sr)
-    assert data["message"]["content"] == message["content"]
+    assert data["message"] == message
     assert data["annotations"]["con_text_uuid"] == str(u)
 
 @pytest.mark.asyncio
@@ -83,7 +83,7 @@ async def test_archive_access_store_message_no_uuid():
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[], _raw=None)
     r = await aa.store_message(message, metadata)
     assert r[0], "Insertion should succeed"
@@ -96,7 +96,7 @@ async def test_archive_access_store_message_no_uuid():
     sr = await aa.store.get_object(dr[0].key)
     assert sr is not None, "Message should be in data store"
     data = bson.loads(sr)
-    assert data["message"]["content"] == message["content"]
+    assert data["message"] == message
 
 @pytest.mark.asyncio
 async def test_archive_access_store_message_duplicate_uuid():
@@ -104,7 +104,7 @@ async def test_archive_access_store_message_duplicate_uuid():
     await aa.connect()
     
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
     r = await aa.store_message(message, metadata)
     assert r[0], "Insertion should succeed"
@@ -117,7 +117,7 @@ async def test_archive_access_store_message_duplicate_wo_uuid():
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[], _raw=None)
     r = await aa.store_message(message, metadata)
     assert r[0], "Insertion should succeed"
@@ -131,7 +131,7 @@ async def test_archive_access_get_metadata():
     await aa.connect()
     
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
     r = await aa.store_message(message, metadata)
     assert r[0], "Insertion should succeed"
@@ -146,7 +146,7 @@ async def test_archive_access_get_metadata():
 async def test_archive_access_get_metadata_for_time_range():
     messages = []
     for i in range(0,10):
-        ms = {"content":b"datadatadata"}
+        ms = b"datadatadata"
         md = Metadata(topic="t1", partition=0, offset=i, timestamp=i, key="", headers=[("_id",uuid.uuid4().bytes)], _raw=None)
         messages.append((ms,md))
     
@@ -184,7 +184,7 @@ async def test_archive_access_get_object_lazily():
     await aa.connect()
     
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
     r = await aa.store_message(message, metadata)
     
@@ -194,7 +194,7 @@ async def test_archive_access_get_object_lazily():
     assert isinstance(r, store_api.Mock_store.LazyObject)
     obj = r.read()
     data = bson.loads(obj)
-    assert data["message"]["content"] == message["content"]
+    assert data["message"] == message
     
     not_found = await aa.get_object_lazily("some invalid key")
     assert not_found is None
@@ -205,7 +205,7 @@ async def test_archive_access_get_raw_object():
     await aa.connect()
     
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
     r = await aa.store_message(message, metadata)
     
@@ -213,7 +213,7 @@ async def test_archive_access_get_raw_object():
     obj = await aa.get_raw_object(key)
     assert obj is not None, "Message should be found"
     data = bson.loads(obj)
-    assert data["message"]["content"] == message["content"]
+    assert data["message"] == message
     
     not_found = await aa.get_raw_object("some invalid key")
     assert not_found is None
@@ -224,7 +224,7 @@ async def test_archive_access_get_all():
     await aa.connect()
     
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
     r = await aa.store_message(message, metadata)
     assert r[0], "Insertion should succeed"
@@ -233,7 +233,7 @@ async def test_archive_access_get_all():
     r = await aa.get_all(key)
     assert r is not None, "Message should be found"
     message_out, metadata_out = r
-    assert message_out == message["content"]
+    assert message_out == message
     assert metadata_out["topic"] == metadata.topic
     assert metadata_out["timestamp"] == metadata.timestamp
     
@@ -246,7 +246,7 @@ async def test_archive_access_get_as_sent():
     await aa.connect()
     
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
     r = await aa.store_message(message, metadata)
     
@@ -254,7 +254,7 @@ async def test_archive_access_get_as_sent():
     r = await aa.get_as_sent(key)
     assert r is not None, "Message should be found"
     message_out, headers_out = r
-    assert message_out == message["content"]
+    assert message_out == message
     assert len(headers_out) == len(metadata.headers)
     assert len(headers_out[0]) == len(metadata.headers[0])
     assert headers_out[0][0] == metadata.headers[0][0]
@@ -269,7 +269,7 @@ async def test_archive_access_get_object_summary():
     await aa.connect()
     
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    message = {"content":b"datadatadata"}
+    message = b"datadatadata"
     metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
     r = await aa.store_message(message, metadata)
     

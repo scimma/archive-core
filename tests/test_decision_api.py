@@ -21,11 +21,11 @@ async def test_is_content_identical():
     await db.connect()
     await st.connect()
     
-    m1 = ({"content":b"abcdefgh"},
+    m1 = (b"abcdefgh",
           Metadata(topic="t1", partition=0, offset=0, timestamp=172, key="", headers=[], _raw=None))
-    m2 = ({"content":b"abcdefgh"},
+    m2 = (b"abcdefgh",
           Metadata(topic="t1", partition=0, offset=1, timestamp=223, key="", headers=[], _raw=None))
-    m3 = ({"content":b"somethingelse"},
+    m3 = (b"somethingelse",
           Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[], _raw=None))
     
     async def store(payload, metadata):
@@ -67,7 +67,7 @@ def test_get_text_uuid():
 def test_get_annotations():
     get_annotations = decision_api.get_annotations
 
-    m1 = ({"content":b"abcdefgh"},[])
+    m1 = (b"abcdefgh",[])
     a1 = get_annotations(m1[0], m1[1])
     assert "con_text_uuid" in a1
     uuid.UUID(a1["con_text_uuid"])
@@ -76,7 +76,7 @@ def test_get_annotations():
     assert "con_message_crc32" in a1
     
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    m2 = ({"content":b"0123456789"},[("_id",u.bytes)])
+    m2 = (b"0123456789",[("_id",u.bytes)])
     a2 = get_annotations(m2[0], m2[1])
     assert "con_text_uuid" in a2
     assert uuid.UUID(a2["con_text_uuid"]) == u
@@ -100,12 +100,12 @@ async def test_is_deemed_duplicate():
     await db.connect()
     await st.connect()
     
-    m1 = ({"content":b"abcdefgh"},
+    m1 = (b"abcdefgh",
           Metadata(topic="t1", partition=0, offset=0, timestamp=172, key="", headers=[], _raw=None))
-    m2 = ({"content":b"abcdefgh"},
+    m2 = (b"abcdefgh",
           Metadata(topic="t1", partition=0, offset=1, timestamp=172, key="", headers=[], _raw=None))
     u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-    m3 = ({"content":b"somethingelse"},
+    m3 = (b"somethingelse",
           Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None))
     
     async def store(payload, metadata, annotations):
