@@ -62,7 +62,7 @@ def get_text_uuid(headers):
 	return (text_uuid, False)
     
 
-def get_annotations(message, headers=[]):
+def get_annotations(message, headers=[], public: bool=True, direct_upload: bool=False):
 	"""
 	Assign standard annotations to a message based on its contents and any headers
 	
@@ -73,6 +73,8 @@ def get_annotations(message, headers=[]):
 	annotations["con_text_uuid"] = text_uuid
 	annotations["con_is_client_uuid"] = is_client_uuid
 	annotations["con_message_crc32"] =  zlib.crc32(message["content"])
+	annotations["public"] =  public
+	annotations["direct_upload"] =  direct_upload
 	return annotations
 
 

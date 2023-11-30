@@ -85,8 +85,9 @@ class Archive_access():
         "check if object is present, and return size if so"
         return await self.store.get_object_summary(key)
 
-    async def store_message(self, payload, metadata):
-        annotations = decision_api.get_annotations(payload, metadata.headers)
+    async def store_message(self, payload, metadata, public: bool=True, direct_upload: bool=False):
+        annotations = decision_api.get_annotations(payload, metadata.headers,
+                                                   public=public, direct_upload=direct_upload)
         if await decision_api.is_deemed_duplicate(annotations, metadata, self.db, self.store):
             logging.info(f"Duplicate not stored {annotations}")
             return (False,"Message with duplicate UUID not stored")

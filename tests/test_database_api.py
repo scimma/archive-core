@@ -1,6 +1,7 @@
 import argparse
 from hop.io import Metadata
 import pytest
+import sqlalchemy
 from unittest import mock
 import uuid
 
@@ -111,12 +112,14 @@ async def test_SQL_db_create(tmpdir):
 		"id": "bigint",
 		"topic": "text",
 		"timestamp": "bigint",
-		"uuid": "text",
+		"uuid": "uuid",
 		"size": "integer",
 		"key": "text",
 		"bucket": "text",
 		"crc32": "bigint",
 		"is_client_uuid": "boolean",
+		"public": "boolean",
+		"direct_upload": "boolean",
 		"message_crc32": "bigint"
 	}
 
@@ -125,11 +128,14 @@ async def test_SQL_db_create(tmpdir):
 		await db.connect()
 		await db.make_schema()
 		
-		result = await db._query("SELECT column_name, data_type FROM information_schema.columns where table_name = 'messages'", True)
-		assert len(result) == len(expected_columns), "table should have the expected number of columns"
-		for cname, type in result:
-			assert cname in expected_columns, "Only expected columns should exist"
-			assert type == expected_columns[cname], "Each column should have the expected type"
+		async with db.engine.connect() as conn:
+			result = await conn.execute(sqlalchemy.text("SELECT column_name, data_type FROM information_schema.columns where table_name = 'messages'"))
+			rows = result.all()
+			print(rows)
+			assert len(rows) == len(expected_columns), "table should have the expected number of columns"
+			for cname, type in rows:
+				assert cname in expected_columns, "Only expected columns should exist"
+				assert type == expected_columns[cname], "Each column should have the expected type"
 		
 		await db.close()
 
@@ -143,7 +149,8 @@ async def test_SQL_db_insert_readonly(tmpdir):
 		with pytest.raises(RuntimeError) as err:		
 			await db.insert("bar",{})
 		assert "This database object is set to read-only; insert is forbidden" in str(err)
-		result = await db._query(f"SELECT * FROM messages", True)
+		async with db.engine.connect() as conn:
+			result = (await conn.execute(sqlalchemy.text("SELECT * FROM messages"))).all()
 		assert len(result) == 0, "No rows should be found"
 
 @pytest.mark.asyncio
@@ -161,19 +168,23 @@ async def test_SQL_db_insert(tmpdir):
 		await db.connect()
 		await db.make_schema()
 		await db.insert(metadata, annotations)
-		result = await db._query("SELECT * FROM messages", True)
+		async with db.engine.connect() as conn:
+			result = (await conn.execute(sqlalchemy.text("SELECT * FROM messages"))).all()
 		assert len(result) == 1, "One row should be found"
-		assert len(result[0]) == 1+9 # id and input columns
+		assert len(result[0]) == 12
 		# with column is the id; we don't care about its value
+		print(result[0])
 		assert result[0][1] == metadata.topic
 		assert result[0][2] == metadata.timestamp
-		assert result[0][3] == annotations['con_text_uuid']
+		assert result[0][3] == u
 		assert result[0][4] == annotations['size']
 		assert result[0][5] == annotations['key']
 		assert result[0][6] == annotations['bucket']
 		assert result[0][7] == annotations['crc32']
 		assert result[0][8] == annotations['con_is_client_uuid']
-		assert result[0][9] == annotations['con_message_crc32']
+		assert result[0][9] == annotations['public']
+		assert result[0][10] == annotations['direct_upload']
+		assert result[0][11] == annotations['con_message_crc32']
 
 @pytest.mark.asyncio
 async def test_SQL_db_fetch(tmpdir):
@@ -196,12 +207,14 @@ async def test_SQL_db_fetch(tmpdir):
 		
 		assert result.topic == metadata.topic
 		assert result.timestamp == metadata.timestamp
-		assert result.uuid == annotations['con_text_uuid']
+		assert result.uuid == u
 		assert result.size == annotations['size']
 		assert result.key == annotations['key']
 		assert result.bucket == annotations['bucket']
 		assert result.crc32 == annotations['crc32']
 		assert result.is_client_uuid == annotations['con_is_client_uuid']
+		assert result.public == True
+		assert result.direct_upload == False
 		assert result.message_crc32 == annotations['con_message_crc32']
 
 @pytest.mark.asyncio
@@ -270,7 +283,7 @@ async def test_SQL_db_uuid_duplicates(tmpdir):
 		await db.insert(meta2, a2)
 		result = await db.get_client_uuid_duplicates(limit=10)
 		assert len(result) == 1, "A duplicate should be found"
-		assert result[0][1] == str(u), "The duplicate should involve the correct UUID"
+		assert result[0][1] == u, "The duplicate should involve the correct UUID"
 
 @pytest.mark.asyncio
 async def test_SQL_db_content_duplicates(tmpdir):
@@ -372,25 +385,25 @@ async def test_SQL_db_get_message_records_for_time_range(tmpdir):
 		r = await db.get_message_records_for_time_range("t1", start_time=4, end_time=7)
 		assert len(r) == 3
 		assert r[0].timestamp == 4
-		assert r[0].uuid == messages[4][2]["con_text_uuid"]
+		assert r[0].uuid == uuid.UUID(messages[4][2]["con_text_uuid"])
 		assert r[1].timestamp == 5
-		assert r[1].uuid == messages[5][2]["con_text_uuid"]
+		assert r[1].uuid == uuid.UUID(messages[5][2]["con_text_uuid"])
 		assert r[2].timestamp == 6
-		assert r[2].uuid == messages[6][2]["con_text_uuid"]
+		assert r[2].uuid == uuid.UUID(messages[6][2]["con_text_uuid"])
 		
 		r = await db.get_message_records_for_time_range("t1", start_time=3, end_time=7, limit=2)
 		assert len(r) == 2
 		assert r[0].timestamp == 3
-		assert r[0].uuid == messages[3][2]["con_text_uuid"]
+		assert r[0].uuid == uuid.UUID(messages[3][2]["con_text_uuid"])
 		assert r[1].timestamp == 4
-		assert r[1].uuid == messages[4][2]["con_text_uuid"]
+		assert r[1].uuid == uuid.UUID(messages[4][2]["con_text_uuid"])
 		
 		r = await db.get_message_records_for_time_range("t1", start_time=3, end_time=7, limit=2, offset=2)
 		assert len(r) == 2
 		assert r[0].timestamp == 5
-		assert r[0].uuid == messages[5][2]["con_text_uuid"]
+		assert r[0].uuid == uuid.UUID(messages[5][2]["con_text_uuid"])
 		assert r[1].timestamp == 6
-		assert r[1].uuid == messages[6][2]["con_text_uuid"]
+		assert r[1].uuid == uuid.UUID(messages[6][2]["con_text_uuid"])
 		
 		r = await db.get_message_records_for_time_range("t1", start_time=12, end_time=14)
 		assert len(r) == 0
