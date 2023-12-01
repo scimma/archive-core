@@ -108,7 +108,7 @@ class Mock_consumer(Base_consumer):
             yield message
 
     def queue(self, message: bytes, metadata):
-        self.messages.append(({"format": "dummy", "content": message}, metadata))
+        self.messages.append((message, metadata))
 
 
 class Hop_consumer(Base_consumer):
@@ -219,10 +219,7 @@ class Hop_consumer(Base_consumer):
         while keep_going:
             keep_going = False
             self.connect()
-            for message, metadata in self.client.read(metadata=True, autocommit=False):
-                # TODO: It would be nice for hop to support a 'raw read' so we don't have to do this
-                message = message.serialize()
-            
+            for message, metadata in self.client.read_raw(metadata=True, autocommit=False):
                 self.n_recieved += 1
                 yield (message, metadata)
                 url_changed = self.refresh_url()

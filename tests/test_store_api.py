@@ -73,7 +73,7 @@ async def test_S3_store_startup(tmpdir):
 @pytest.mark.asyncio
 async def test_S3_store_store_get(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -89,7 +89,7 @@ async def test_S3_store_store_get(tmpdir):
 		obj = await st.get_object(annotations["key"])
 		assert obj is not None, "Message should be found"
 		data = bson.loads(obj)
-		assert data["message"]["content"] == message["content"]
+		assert data["message"] == message
 		
 		not_found = await st.get_object("some invalid key")
 		assert not_found is None
@@ -99,7 +99,7 @@ async def test_S3_store_store_get(tmpdir):
 @pytest.mark.asyncio
 async def test_S3_store_store_readonly(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -117,7 +117,7 @@ async def test_S3_store_store_readonly(tmpdir):
 @pytest.mark.asyncio
 async def test_S3_store_get_lazily(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadatadata"*64}
+	message = b"datadatadatadata"*64
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -133,7 +133,7 @@ async def test_S3_store_get_lazily(tmpdir):
 		async for chunk in result['Body']:
 			output.write(chunk)
 		data = bson.loads(output.getvalue())
-		assert data["message"]["content"] == message["content"]
+		assert data["message"] == message
 		
 		result = await st.get_object_lazily("a-non-existent-key")
 		assert result is None
@@ -143,7 +143,7 @@ async def test_S3_store_get_lazily(tmpdir):
 @pytest.mark.asyncio
 async def test_S3_store_get_object_summary(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadatadata"*64}
+	message = b"datadatadatadata"*64
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -171,7 +171,7 @@ async def test_S3_store_get_object_summary(tmpdir):
 @pytest.mark.asyncio
 async def test_Mock_store_store_readonly(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -189,7 +189,7 @@ async def test_Mock_store_store_readonly(tmpdir):
 @pytest.mark.asyncio
 async def test_Mock_store_deep_delete(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 

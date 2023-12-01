@@ -33,7 +33,7 @@ async def is_content_identical(ids, db, store):
     for bucket, key in locations:
         content = bson.loads(await store.get_object(key))
         contents.append(content)
-    crc_set = {zlib.crc32(c["message"]["content"]) for c in contents}
+    crc_set = {zlib.crc32(c["message"]) for c in contents}
     return len(crc_set) == 1
 
 
@@ -72,7 +72,7 @@ def get_annotations(message, headers=[], public: bool=True, direct_upload: bool=
 	text_uuid, is_client_uuid  = get_text_uuid(headers)
 	annotations["con_text_uuid"] = text_uuid
 	annotations["con_is_client_uuid"] = is_client_uuid
-	annotations["con_message_crc32"] =  zlib.crc32(message["content"])
+	annotations["con_message_crc32"] =  zlib.crc32(message)
 	annotations["public"] =  public
 	annotations["direct_upload"] =  direct_upload
 	return annotations
