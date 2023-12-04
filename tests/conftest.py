@@ -15,6 +15,9 @@ try:
 except ImportError:
 	have_docker = False
 
+if os.environ.get('POSTGRES_REMOTE_DB',''):
+	import psycopg
+
 @contextmanager
 def temp_environ(**vars):
     """
@@ -160,6 +163,44 @@ class NativePostgresServer(PostgresServer):
 		stop_result = self.run_control("stop")
 		super().close()
 
+class RemotePostgresServer(PostgresServer):
+	def __init__(self):
+		self.info = PostgresServerInfo(
+			os.environ.get('POSTGRESQL_HOST', 'localhost'),
+			os.environ.get('POSTGRESQL_PORT', 5432),
+		)
+		self.info.dbname = "postgres"
+		self.info.username = "postgres"
+		max_retries = os.environ.get('POSTGRES_REMOTE_DB_RETRIES', 10)
+		while max_retries > 0:
+			try:
+				conn = psycopg.connect(
+					dbname  = self.info.dbname,
+					user    = self.info.username,
+					password = "",
+					host     = self.info.host,
+					port     = self.info.port
+				)
+				conn.autocommit = True
+				# create a cursor
+				cur = conn.cursor()
+				cur.execute("SELECT table_schema,table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_schema,table_name")
+				rows = cur.fetchall()
+				for row in rows:
+					cur.execute("drop table " + row[1] + " cascade")
+				cur.close()
+				conn.close()
+				break
+			except:
+				print('Waiting 1 second to retry database connection...')
+				time.sleep(1)
+				max_retries -= 1
+				continue
+		super().__init__()
+
+	def close(self):
+		super().close()
+
 class DockerPostgresServer(PostgresServer):
 	def __init__(self):
 		logging.info("Starting postgres in Docker")
@@ -180,7 +221,7 @@ class DockerPostgresServer(PostgresServer):
 			self.container.reload()
 		if self.container.status != "running":
 			raise RuntimeError(f"Failed to start postgres image: \n{self.container.logs()}")
-		port = int(self.container.attrs["HostConfig"]["PortBindings"]["5432/tcp"][0]["HostPort"])
+		port = int(self.container.attrs["NetworkSettings"]["Ports"]["5432/tcp"][0]["HostPort"])
 		self.info = PostgresServerInfo("localhost", port)
 		self.info.dbname = "postgres"
 		self.info.username = "postgres"
@@ -208,6 +249,8 @@ class DockerPostgresServer(PostgresServer):
 		super().close()
 
 def get_postgres_db(working_directory):
+	if os.environ.get('POSTGRES_REMOTE_DB',''):
+		return RemotePostgresServer()
 	if check_native_postgres_availability():
 		return NativePostgresServer(working_directory+"/postgres_data")
 	if have_docker and check_docker_availability():
@@ -333,7 +376,7 @@ class DockerMinIOServer(MinIOServer):
 			self.container.reload()
 		if self.container.status != "running":
 			raise RuntimeError(f"Failed to start minio image: \n{self.container.logs()}")
-		port = int(self.container.attrs["HostConfig"]["PortBindings"]["9000/tcp"][0]["HostPort"])
+		port = int(self.container.attrs["NetworkSettings"]["Ports"]["9000/tcp"][0]["HostPort"])
 		self.info = MinIOServerInfo("localhost", port, "minioadmin", "minioadmin")
 		# Even though the docker container is running, the object store may not have fully started up,
 		# so poll until it can be connected to.

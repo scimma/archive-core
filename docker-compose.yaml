@@ -14,10 +14,29 @@ services:
       context: .
       dockerfile: ./docker/Dockerfile
     container_name: archiver
-    env_file: .env
+    environment:
+      - "POSTGRES_REMOTE_DB=true"
+      - "POSTGRESQL_HOST=db"
     networks:
       - internal
     command:
       - '/bin/bash'
       - '-c'
       - make test
+
+  ## 
+  ## Archiver database for tests
+  ##
+  db:
+    image: 'postgres:16'
+    container_name: archive-db
+    environment:
+      - "POSTGRES_HOST_AUTH_METHOD=trust"
+      - "POSTGRES_USER=postgres"
+      - "POSTGRES_DB=postgres"
+    # ports:
+    #   - 127.0.0.1:5432:5432
+    networks:
+      - internal
+    # volumes:
+    #   - postgres:/var/lib/postgresql
