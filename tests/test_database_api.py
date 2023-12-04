@@ -156,7 +156,7 @@ async def test_SQL_db_insert_readonly(tmpdir):
 @pytest.mark.asyncio
 async def test_SQL_db_insert(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -189,7 +189,7 @@ async def test_SQL_db_insert(tmpdir):
 @pytest.mark.asyncio
 async def test_SQL_db_fetch(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -220,7 +220,7 @@ async def test_SQL_db_fetch(tmpdir):
 @pytest.mark.asyncio
 async def test_SQL_db_uuid_in_db(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -238,7 +238,7 @@ async def test_SQL_db_uuid_in_db(tmpdir):
 @pytest.mark.asyncio
 async def test_SQL_db_exists_in_db(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -256,11 +256,11 @@ async def test_SQL_db_exists_in_db(tmpdir):
 @pytest.mark.asyncio
 async def test_SQL_db_uuid_duplicates(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	m1 = {"content":b"datadatadata"}
+	m1 = b"datadatadata"
 	meta1 = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	a1 = decision_api.get_annotations(m1, meta1.headers)
 	
-	m2 = {"content":b"otherdata"}
+	m2 = b"otherdata"
 	meta2 = Metadata(topic="t2", partition=0, offset=4, timestamp=19, key="", headers=[("_id",u.bytes)], _raw=None)
 	a2 = decision_api.get_annotations(m2, meta2.headers)
 
@@ -288,12 +288,12 @@ async def test_SQL_db_uuid_duplicates(tmpdir):
 @pytest.mark.asyncio
 async def test_SQL_db_content_duplicates(tmpdir):
 	u1 = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	m1 = {"content":b"datadatadata"}
+	m1 = b"datadatadata"
 	meta1 = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u1.bytes)], _raw=None)
 	a1 = decision_api.get_annotations(m1, meta1.headers)
 	
 	u2 = uuid.UUID("76543210-ffff-eeee-dddd-9876543210ba")
-	m2 = {"content":b"datadatadata"}
+	m2 = b"datadatadata"
 	meta2 = Metadata(topic="t1", partition=0, offset=4, timestamp=356, key="", headers=[("_id",u2.bytes)], _raw=None)
 	a2 = decision_api.get_annotations(m2, meta2.headers)
 
@@ -323,7 +323,7 @@ async def test_SQL_db_content_duplicates(tmpdir):
 @pytest.mark.asyncio
 async def test_SQL_db_get_message_id(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -344,7 +344,7 @@ async def test_SQL_db_get_message_id(tmpdir):
 @pytest.mark.asyncio
 async def test_SQL_db_get_message_locations(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -368,7 +368,7 @@ async def test_SQL_db_get_message_records_for_time_range(tmpdir):
 	messages = []
 	st = await get_mock_store()
 	for i in range(0,10):
-		ms = {"content":b"datadatadata"}
+		ms = b"datadatadata"
 		md = Metadata(topic="t1", partition=0, offset=i, timestamp=i, key="", headers=[("_id",uuid.uuid4().bytes)], _raw=None)
 		an = decision_api.get_annotations(ms, md.headers)
 		await st.store(ms, md, an)
@@ -448,7 +448,7 @@ async def test_Base_db_unimlemented():
 @pytest.mark.asyncio
 async def test_Mock_db_get_message_id():
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
@@ -478,7 +478,7 @@ async def test_Mock_db_insert_readonly():
 @pytest.mark.asyncio
 async def test_Mock_db_fetch():
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-	message = {"content":b"datadatadata"}
+	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 

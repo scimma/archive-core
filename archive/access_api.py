@@ -69,7 +69,7 @@ class Archive_access():
         if bundle is None:
             return None
         bundle =  bson.loads(bundle)
-        message = bundle["message"]["content"]
+        message = bundle["message"]
         metadata = bundle["metadata"]
         return (message, metadata)
 
