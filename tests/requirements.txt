@@ -1,3 +1,6 @@
 pytest
 pytest-cov
 pytest-asyncio
+docker
+requests
+psycopg2
