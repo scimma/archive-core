@@ -1,5 +1,9 @@
 build/
-*.egg-info/
 __pycache__
+*.egg-info/
+.coverage
+.coverage.*
+.pytest_cache/
+env/
 venv/
 .git/
