@@ -20,6 +20,7 @@ extention to SQLite.
 import boto3
 from botocore.exceptions import ClientError
 import sqlalchemy
+bindparam = sqlalchemy.bindparam
 from sqlalchemy.ext.asyncio import create_async_engine, create_async_pool_from_url
 import psycopg
 from psycopg_pool import AsyncConnectionPool
@@ -348,7 +349,9 @@ class SQL_db(Base_db):
                  matching row was found.
         """
         async with self.engine.connect() as conn:
-            result = await conn.execute(self.table.select().where(self.table.c.uuid == uuid))
+            result = await conn.execute(self.table.select()\
+                                        .where(self.table.c.uuid == bindparam("uuid")),
+                                        {"uuid":uuid})
             record = result.first()
             if record is None:
                 return None
@@ -359,7 +362,10 @@ class SQL_db(Base_db):
         Determine if this UUID is in the database
         """
         async with self.engine.connect() as conn:
-            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.count()).select_from(self.table).where(self.table.c.uuid == uuid))
+            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.count())\
+                                        .select_from(self.table)\
+                                        .where(self.table.c.uuid == bindparam("uuid")),
+                                        {"uuid":uuid})
             return result.scalar() or False
 
     async def exists_in_db(self, topic, timestamp, message_crc32):
@@ -370,9 +376,12 @@ class SQL_db(Base_db):
         async with self.engine.connect() as conn:
             result = await conn.execute(sqlalchemy.select(sqlalchemy.func.count())\
                                         .select_from(self.table)\
-                                        .where((self.table.c.timestamp == timestamp) &
-                                               (self.table.c.topic == topic) &
-                                               (self.table.c.message_crc32 == message_crc32)))
+                                        .where((self.table.c.timestamp == bindparam("timestamp")) &
+                                               (self.table.c.topic == bindparam("topic")) &
+                                               (self.table.c.message_crc32 == bindparam("crc32"))),
+                                        {"timestamp":timestamp,
+                                         "topic":topic,
+                                         "crc32":message_crc32})
             return result.scalar() or False
 
     async def get_client_uuid_duplicates(self, limit: int = 1):
@@ -392,7 +401,8 @@ class SQL_db(Base_db):
                                         .select_from(self.table)
                                         .group_by(self.table.c.uuid)
                                         .having(sqlalchemy.func.count() > 1)
-                                        .limit(limit)
+                                        .limit(bindparam("limit")),
+                                        {"limit":limit}
                                         )
             return result.all()
 
@@ -411,7 +421,8 @@ class SQL_db(Base_db):
                                                   self.table.c.timestamp,
                                                   self.table.c.message_crc32)
                                         .having(sqlalchemy.func.count() > 1)
-                                        .limit(limit)
+                                        .limit(bindparam("limit")),
+                                        {"limit":limit}
                                         )
             return result.all()
 
@@ -439,7 +450,8 @@ class SQL_db(Base_db):
         async with self.engine.connect() as conn:
             result = await conn.execute(sqlalchemy.select(self.table.c.id)\
                                         .select_from(self.table)\
-                                        .where(self.table.c.uuid == uuid))
+                                        .where(self.table.c.uuid == bindparam("uuid")),
+                                        {"uuid":uuid})
             return result.scalar()
 
     async def get_message_locations(self, ids):
@@ -453,16 +465,22 @@ class SQL_db(Base_db):
         async with self.engine.connect() as conn:
             result = await conn.execute(sqlalchemy.select(self.table.c.bucket, self.table.c.key)\
                                         .select_from(self.table)\
-                                        .where(self.table.c.id.in_(ids)))
+                                        .where(self.table.c.id.in_(bindparam("ids"))),
+                                        {"ids":ids})
             return result.all()
 
     async def get_message_records_for_time_range(self, topic: str, start_time: int, end_time: int, limit: int=10, offset: int=0):
         async with self.engine.connect() as conn:
             result = await conn.execute(self.table.select()\
-                                        .where((self.table.c.topic == topic) &
-                                               (self.table.c.timestamp >= start_time) &
-                                               (self.table.c.timestamp < end_time))
-                                        .limit(limit).offset(offset))
+                                        .where((self.table.c.topic == bindparam("topic")) &
+                                               (self.table.c.timestamp >= bindparam("start_time")) &
+                                               (self.table.c.timestamp < bindparam("end_time")))
+                                        .limit(bindparam("limit")).offset(bindparam("offset")),
+                                        {"topic":topic,
+                                         "start_time":start_time,
+                                         "end_time":end_time,
+                                         "limit":limit,
+                                         "offset":offset})
             return [Base_db.MessageRecord(**record._mapping) for record in result.all()]
 
 
