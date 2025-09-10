@@ -53,6 +53,8 @@ def get_text_uuid(headers):
 	for _id in _ids:
 		try:
 			binary_uuid = _id[1]
+			if not isinstance(binary_uuid, bytes):
+				binary_uuid = bytes(binary_uuid)
 			return (str(uuid.UUID(bytes=binary_uuid)), True)
 		except (ValueError, IndexError, TypeError):
 			continue
@@ -72,7 +74,7 @@ def get_annotations(message, headers=[], public: bool=True, direct_upload: bool=
 	text_uuid, is_client_uuid  = get_text_uuid(headers)
 	annotations["con_text_uuid"] = text_uuid
 	annotations["con_is_client_uuid"] = is_client_uuid
-	annotations["con_message_crc32"] =  zlib.crc32(message)
+	annotations["con_message_crc32"] =  message.crc32() if hasattr(message, "crc32") else zlib.crc32(message)
 	annotations["public"] =  public
 	annotations["direct_upload"] =  direct_upload
 	return annotations

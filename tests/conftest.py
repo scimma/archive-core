@@ -419,7 +419,7 @@ def temp_minio(tmpdir):
 		with temp_environ(S3_ACCESS_KEY_ID=ms.info.user, S3_SECRET_ACCESS_KEY=ms.info.password):
 			yield {
 				"store_endpoint_url": f"http://{ms.info.host}:{ms.info.port}",
-				"store_region_name": "",
+				"store_region_name": "us-east-1",
 				"store_primary_bucket": "archive",
 				"store_backup_bucket": "backup",
 				"__test_store_server": ms,
