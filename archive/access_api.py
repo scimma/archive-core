@@ -90,7 +90,10 @@ class Archive_access():
                                                    public=public, direct_upload=direct_upload)
         if await decision_api.is_deemed_duplicate(annotations, metadata, self.db, self.store):
             logging.info(f"Duplicate not stored {annotations}")
-            return (False,"Message with duplicate UUID not stored")
+            return (False,{},"Message with duplicate UUID not stored")
         await self.store.store(payload, metadata, annotations)
         await self.db.insert(metadata, annotations)
-        return (True,"")
+        return (True,
+                {"archive_uuid": annotations["con_text_uuid"],
+                 "is_client_uuid": annotations["con_is_client_uuid"]},
+                "")

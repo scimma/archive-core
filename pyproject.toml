@@ -7,9 +7,8 @@ name = "archive-core"
 description = "Core implementation of the Hopskotch Archive"
 requires-python = ">=3.6"
 dependencies = [
-    "aioboto3",
-    "boto3<=1.33.10",
-    "botocore<=1.33.10",
+    "aioboto3==15.1.0",
+    "aiobotocore[boto3]==2.24.0",
     "bson",
     "cython<3 ; python_version < '3.8'", # need this to work around https://github.com/fastavro/fastavro/issues/701
     "fastapi",
@@ -26,3 +25,10 @@ version = "0"
 
 [tool.setuptools]
 packages = ["archive"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+]

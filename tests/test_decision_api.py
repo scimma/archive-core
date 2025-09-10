@@ -1,4 +1,5 @@
 from hop.io import Metadata
+from io import BytesIO
 import pytest
 import uuid
 
@@ -50,6 +51,16 @@ def test_get_text_uuid():
     uo1 = get_text_uuid([("_id", ui1.bytes)])
     assert uo1[0] == str(ui1)
     assert uo1[1], "UUID should be marked as originating from the client"
+    
+    # A raw UUID viewed via a memoryview should be correctly extracted
+    buf = BytesIO()
+    buf.write(b"prefix")
+    buf.write(ui1.bytes)
+    buf.write(b"suffix")
+    v = memoryview(buf.getvalue())
+    uo1v = get_text_uuid([("_id", v[6:22])])
+    assert uo1v[0] == str(ui1)
+    assert uo1v[1], "UUID should be marked as originating from the client"
     
     ui2 = uuid.uuid4()
     uo2 = get_text_uuid([("_id", ui1.bytes), ("_id", ui2.bytes)])

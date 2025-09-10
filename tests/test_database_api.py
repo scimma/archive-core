@@ -1,5 +1,7 @@
 import argparse
+from contextlib import contextmanager
 from hop.io import Metadata
+import os
 import pytest
 import sqlalchemy
 from unittest import mock
@@ -91,12 +93,24 @@ async def test_SQL_db_startup(tmpdir):
 		await db.connect()
 		await db.close()
 
+@contextmanager
+def env_without(vars):
+	original = dict(os.environ)
+	for var in vars:
+		if var in os.environ:
+			del os.environ[var]
+	try:
+		yield
+	finally:
+		os.environ.update(original)
+
 @pytest.mark.asyncio
 async def test_SQL_db_connect_no_password():
-	db = database_api.SQL_db({"db_host": "a-host"})
-	with pytest.raises(RuntimeError) as err:
-		await db.connect()
-	assert "SQL database password was not configured" in str(err)
+	with env_without(["DB_PASSWORD"]):
+		with pytest.raises(RuntimeError) as err:
+			db = database_api.SQL_db({"db_host": "a-host"})
+			await db.connect()
+		assert "SQL database password was not configured" in str(err)
 
 @pytest.mark.asyncio
 async def test_SQL_db_connect_no_host():

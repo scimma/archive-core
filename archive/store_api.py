@@ -17,15 +17,23 @@ All classes use a namespace object (config), such
 as provided by argparse, as part of their interface.
 """
 
+import aioboto3
+import aiohttp
 import boto3
 import botocore
-import aioboto3
 import bson
+import certifi
+from collections.abc import AsyncIterable, AsyncIterator
+from io import BytesIO, StringIO
 import logging
-import time
-from . import utility_api
-import zlib
 import os
+import ssl
+import time
+import zlib
+
+from . import utility_api
+from .mview import MMView, encode_lazy_bson
+
 
 ##################################
 # stores
@@ -64,7 +72,7 @@ class Base_store:
         else:
             self.s3_provider = 'aws'
             self.s3_endpoint_url = ''
-            self.s3_region_name = ''
+            self.s3_region_name = config['store_region_name']
             self.aws_access_key_id= ''
             self.aws_secret_access_key= ''
         self.n_stored = 0
@@ -107,11 +115,10 @@ class Base_store:
                                "key": metadata.key,
                                "topic" : metadata.topic
                               }
-        ret = bson.dumps({"message" : payload,
-                          "metadata" : simplified_metadata,
-                          "annotations": annotations
-                          })
-        return ret
+        return encode_lazy_bson({"message" : payload,
+                                 "metadata" : simplified_metadata,
+                                 "annotations": annotations
+                                 })
 
     def get_object(self, key):
         "if not overriden, print error and die"
@@ -143,10 +150,16 @@ class S3_store(Base_store):
             await self.initialize_bucket(bucket=self.primary_bucket)
             await self.initialize_bucket(bucket=self.backup_bucket)
         else:
-            self.client = await aioboto3.Session().client('s3').__aenter__()
+            self.client = await aioboto3.Session().client('s3', region_name=self.s3_region_name,
+                                                          config=botocore.client.Config(s3={'addressing_style': 'virtual'})).__aenter__()
+        
+        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        conn = aiohttp.TCPConnector(ssl_context=ssl_ctx)
+        self.http_session = aiohttp.ClientSession(connector=conn)
 
     async def close(self):
         await self.client.close()
+        await self.http_session.close()
 
     async def initialize_bucket(self, bucket=''):
         exists = True
@@ -167,12 +180,26 @@ class S3_store(Base_store):
         if self.read_only:
             raise RuntimeError("This store object is set to read-only; store is forbidden")
 
+        if not isinstance(payload, MMView):
+            payload = MMView(payload)
+
         bucket = self.primary_bucket
         key = self.get_key(metadata, annotations["con_text_uuid"])
         b = self.get_as_bson(payload, metadata, annotations)
         size = len(b)
-        crc32 = zlib.crc32(b)
-        await self.client.put_object(Body=b, Bucket=bucket, Key=key)
+        
+        crc32 = b.crc32()
+        store_url = await self.client.generate_presigned_url(ClientMethod="put_object",
+                                                             Params={"Bucket": bucket, "Key": key,
+                                                                     "ContentLength": size},
+                                                             ExpiresIn=600.0)
+        async with self.http_session.put(store_url, data=b.generate(),
+                                         headers={"Content-Length": str(size)},
+                                         skip_auto_headers=["User-Agent", "Content-Type"]) as resp:
+            if resp.status < 200 or resp.status > 299:
+                logging.error(await resp.text())
+                raise RuntimeError("Bucket PUT operation failed")
+        
         self.n_stored += 1
         self.set_storeinfo(annotations, key, size, crc32)
         self.log(annotations)
@@ -299,6 +326,9 @@ class Mock_store(Base_store):
         if self.read_only:
             raise RuntimeError("This store object is set to read-only; store is forbidden")
         assert self.connected
+        
+        if not isinstance(payload, MMView):
+            payload = MMView(payload)
 
         bucket = self.primary_bucket
         if not bucket in self.buckets:
@@ -307,7 +337,7 @@ class Mock_store(Base_store):
         key = self.get_key(metadata, annotations["con_text_uuid"])
         b = self.get_as_bson(payload, metadata, annotations)
         size = len(b)
-        crc32 = zlib.crc32(b)
+        crc32 = b.crc32()
         self.buckets[bucket][key] = b
         
         self.n_stored += 1
