@@ -215,7 +215,8 @@ async def test_Mock_store_deep_delete(tmpdir):
 	await st.close()
 
 def test_Base_store_unimplemented():
-	bs = store_api.Base_store({"store_primary_bucket": "a", "store_backup_bucket": "b"})
+	bs = store_api.Base_store({"store_primary_bucket": "a", "store_backup_bucket": "b",
+	                           "store_region_name": "nowhere"})
 	with pytest.raises(NotImplementedError):
 		bs.get_object("akey")
 	with pytest.raises(NotImplementedError):
