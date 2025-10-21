@@ -22,18 +22,23 @@ used at run-time.
 
 import boto3
 import datetime
-import random
-import logging
-import time
-import json
 import hop
+import json
+import logging
 import os
+import random
+import re
+import requests
+import time
+from typing import Optional
+from urllib.parse import urlparse
 import uuid
 from hop.io import Stream, StartPosition, list_topics
+from . import http_scram
 from . import utility_api
 
 def ConsumerFactory(config):
-    type = config["hop_type"]
+    type = config["consumer_type"]
     #instantiate, then return consumer object of correct type.
     if type == "mock" : return Mock_consumer(config)
     if type == "hop"  : return Hop_consumer (config)
@@ -42,38 +47,58 @@ def ConsumerFactory(config):
 
 def add_parser_options(parser):
     EnvDefault=utility_api.EnvDefault
-    parser.add_argument("--hop-type", help="Type of consumer to use", type=str,
-                        choices=["hop","mock"], default="hop", action=EnvDefault, envvar="HOP_TYPE")
-    parser.add_argument("--hop-hostname", help="Hostname of the hop/Kafka broker", type=str,
-                        action=EnvDefault, envvar="HOP_HOSTNAME", required=False)
-    parser.add_argument("--hop-port", help="Port number on which to contact the hop/Kafka broker",
-                        type=int, action=EnvDefault, envvar="HOP_PORT", default=9092,
+    parser.add_argument("--consumer-type", help="Type of consumer to use", type=str,
+                        choices=["hop","mock"], default="hop", action=EnvDefault,
+                        envvar="CONSUMER_TYPE")
+    parser.add_argument("--kafka-hostname", help="Hostname of the hop/Kafka broker", type=str,
+                        action=EnvDefault, envvar="KAFKA_HOSTNAME", required=False)
+    parser.add_argument("--kafka-port", help="Port number on which to contact the hop/Kafka broker",
+                        type=int, action=EnvDefault, envvar="KAFKA_PORT", default=9092,
                         required=False)
-    parser.add_argument("--hop-username", help="Username of the hop/Kafka credential", type=str,
-                        action=EnvDefault, envvar="HOP_USERNAME", required=False)
-    parser.add_argument("--hop-groupname",
+    parser.add_argument("--kafka-username",
+                        help="Username of the credential to use for the kafka broker", type=str,
+                        action=EnvDefault, envvar="KAFKA_USERNAME", required=False)
+    parser.add_argument("--kafka-groupname",
                         help="Kafka consumer group name to track reading progress", type=str,
-                        action=EnvDefault, envvar="HOP_GROUPNAME", required=False)
-    parser.add_argument("--hop-until-eos",
+                        action=EnvDefault, envvar="KAFKA_GROUPNAME", required=False)
+    parser.add_argument("--kafka-until-eos",
                         help="Whether to stop reading topics after consuming all current messages",
                         type=bool, default=False)
-    parser.add_argument("--hop-local-auth",
-                        help="Path to a local hop auth TOML file from which to read credentials",
-                        type=str, action=EnvDefault, envvar="HOP_LOCAL_AUTH", required=False)
-    parser.add_argument("--hop-aws-secret-name",
-                        help="Name of an AWS secret from which to read hop credentials", type=str,
-                        action=EnvDefault, envvar="HOP_AWS_SECRET_NAME", required=False)
-    parser.add_argument("--hop-aws-secret-region",
-                        help="Name of the AWS region in which to look for the AWS secret from which "
-                        "to read hop credentials", type=str, action=EnvDefault, 
-                        envvar="HOP_AWS_SECRET_REGION", default="us-west-2", required=False)
-    parser.add_argument("--hop-vetoed-topics", help="Names of topics to skip reading", type=str, 
-                        nargs='*', action=EnvDefault, envvar="HOP_VETOED_TOPICS",
+    parser.add_argument("--kafka-local-auth",
+                        help="Path to a local hop auth TOML file from which to read credentials "
+                        "for the kafka broker", type=str, action=EnvDefault,
+                        envvar="KAFKA_LOCAL_AUTH", required=False)
+    parser.add_argument("--kafka-aws-secret-name",
+                        help="Name of an AWS secret from which to read kafka credentials", type=str,
+                        action=EnvDefault, envvar="KAFKA_AWS_SECRET_NAME", required=False)
+    parser.add_argument("--kafka-aws-secret-region",
+                        help="Name of the AWS region in which to look for the AWS secret from which"
+                        " to read hop credentials", type=str, action=EnvDefault,
+                        envvar="KAFKA_AWS_SECRET_REGION", default="us-west-2", required=False)
+    parser.add_argument("--kafka-vetoed-topics", help="Names of topics to skip reading", type=str,
+                        nargs='*', action=EnvDefault, envvar="KAFKA_VETOED_TOPICS",
                         default=["sys.heartbeat"])
-    parser.add_argument("--hop-topic-refresh-interval",
+    parser.add_argument("--kafka-topic-refresh-interval",
                         help="Number of seconds to wait before rescanning topics to archive",
-                        type=int, action=EnvDefault, envvar="HOP_TOPIC_REFRESH_INTERVAL",
+                        type=int, action=EnvDefault, envvar="KAFKA_TOPIC_REFRESH_INTERVAL",
                         default=600)
+    parser.add_argument("--hopauth-api-url", help="Base URL for the hopauth API",
+                        type=str, action=EnvDefault, envvar="HOPAUTH_API_URL", required=False)
+    parser.add_argument("--hopauth-username",
+                        help="Username of the credential to use for the hopauth API", type=str,
+                        action=EnvDefault, envvar="HOPAUTH_USERNAME", required=False)
+    parser.add_argument("--hopauth-local-auth",
+                        help="Path to a local hop auth TOML file from which to read credentials "
+                        "for the hopauth API", type=str, action=EnvDefault,
+                        envvar="HOPAUTH_LOCAL_AUTH", required=False)
+    parser.add_argument("--hopauth-aws-secret-name",
+                        help="Name of an AWS secret from which to read hopauth API credentials",
+                        type=str, action=EnvDefault, envvar="HOPAUTH_AWS_SECRET_NAME",
+                        required=False)
+    parser.add_argument("--hopauth-aws-secret-region",
+                        help="Name of the AWS region in which to look for the AWS secret from which"
+                        " to read hopauth API credentials", type=str, action=EnvDefault, 
+                        envvar="HOPAUTH_AWS_SECRET_REGION", default="us-west-2", required=False)
 
 
 class Base_consumer:
@@ -129,37 +154,58 @@ class Hop_consumer(Base_consumer):
     """
     def __init__(self, config):
         super().__init__(config)
-        self.groupname        = config["hop_groupname"]
-        self.until_eos        = config.get("hop_until_eos", False)
-        if "hop_username" in config and config["hop_username"] and "HOP_PASSWORD" in os.environ:
-            auth  = [hop.auth.Auth(config["hop_username"], os.environ["HOP_PASSWORD"])]
-        elif "hop_local_auth" in config and config["hop_local_auth"]:
-            auth = hop.auth.load_auth(config["hop_local_auth"])
-        elif "hop_aws_secret_name" in config and config["hop_aws_secret_name"] \
-             and "hop_aws_secret_region" in config and config["hop_aws_secret_region"]:
-            auth = self.auth_from_secret(config["hop_aws_secret_region"],
-                                         config["hop_aws_secret_name"])
-        else:
-            raise RuntimeError("Hopskotch/Kafka credentials not configured")
-
-        self.vetoed_topics    = config.get("hop_vetoed_topics", [])
-        self.refresh_interval = config.get("hop_topic_refresh_interval", 600)
-        self.last_last_refresh_time = 0
-
-        broker_authority = f"{config['hop_hostname']}:{config['hop_port']}"
-        self.auth = hop.auth.select_matching_auth(auth, broker_authority,
-                                                  config.get("hop_username", None))
+        self.groupname        = config["kafka_groupname"]
+        self.until_eos        = config.get("kafka_until_eos", False)
+        
+        broker_authority = f"{config['kafka_hostname']}:{config['kafka_port']}"
         self.base_url = f"kafka://{broker_authority}/"
+        self.auth_api_url = config["hopauth_api_url"]
+        
+        if "kafka_username" in config and config["kafka_username"] \
+          and "KAFKA_PASSWORD" in os.environ:
+            self.kafka_auth = hop.auth.Auth(config["kafka_username"], os.environ["KAFKA_PASSWORD"])
+        elif "kafka_local_auth" in config and config["kafka_local_auth"]:
+            auth = hop.auth.load_auth(config["kafka_local_auth"])
+            self.kafka_auth = hop.auth.select_matching_auth(auth, broker_authority,
+                                                  config.get("kafka_username", None))
+        elif "kafka_aws_secret_name" in config and config["kafka_aws_secret_name"] \
+             and "kafka_aws_secret_region" in config and config["kafka_aws_secret_region"]:
+            self.kafka_auth = self.auth_from_secret(config["kafka_aws_secret_region"],
+                                                    config["kafka_aws_secret_name"],
+                                                    config.get("kafka_username", None))
+        else:
+            raise RuntimeError("Kafka broker credentials not configured")
+            
+        if "hopauth_username" in config and config["hopauth_username"] \
+          and "HOPAUTH_PASSWORD" in os.environ:
+            self.hopauth_auth = hop.auth.Auth(config["hopauth_username"],
+                                              os.environ["HOPAUTH_PASSWORD"])
+        elif "hopauth_local_auth" in config and config["hopauth_local_auth"]:
+            auth = hop.auth.load_auth(config["hopauth_local_auth"])
+            self.hopauth_auth = hop.auth.select_matching_auth(auth,
+                                                              urlparse(self.auth_api_url).netloc,
+                                                              config.get("hopauth_username", None))
+        elif "hopauth_aws_secret_name" in config and config["hopauth_aws_secret_name"] \
+             and "hopauth_aws_secret_region" in config and config["hopauth_aws_secret_region"]:
+            self.hopauth_auth = self.auth_from_secret(config["hopauth_aws_secret_region"],
+                                                      config["hopauth_aws_secret_name"],
+                                                      config.get("hopauth_username", None))
+        else:
+            raise RuntimeError("Hopauth API credentials not configured")
+
+        self.vetoed_topics    = config.get("kafka_vetoed_topics", [])
+        self.refresh_interval = config.get("kafka_topic_refresh_interval", 600)
+        self.last_last_refresh_time = 0
         
         if self.groupname == '*random*':
-            self.group_id = f"{self.auth.username}-{random.randint(0,10000)}"
+            self.group_id = f"{self.kafka_auth.username}-{random.randint(0,10000)}"
         else:
-            self.group_id = f"{self.auth.username}-{self.groupname}"
+            self.group_id = f"{self.kafka_auth.username}-{self.groupname}"
 
         self.n_recieved = 0
         self.client = None
     
-    def auth_from_secret(self, secret_region: str, secret_name: str):
+    def auth_from_secret(self, secret_region: str, secret_name: str, username: str=""):
         session = boto3.session.Session()
         client = session.client(
             service_name='secretsmanager',
@@ -168,8 +214,35 @@ class Hop_consumer(Base_consumer):
         resp = client.get_secret_value(
             SecretId=secret_name
         )['SecretString']
-        resp = json.loads(resp)
-        return [hop.auth.Auth(resp["username"], resp["password"])]
+        try:
+            data = json.loads(resp)
+            return hop.auth.Auth(data["username"], data["password"])
+        except json.JSONDecodeError:
+            pass
+        
+        # if the data is not JSON try parsing it as a text config file
+        chunks = resp.split(' ')
+        creds = {}
+        last_user=None
+        for chunk in chunks:
+            if match:=re.fullmatch('username="([^"]+)"', chunk):
+                last_user=match[1]
+            elif match:=re.fullmatch('password="([^"]+)"', chunk):
+                if last_user is not None:
+                    creds[last_user]=match[1]
+                last_user=None
+            elif match:=re.fullmatch('user_([^=]+)="([^"]+)"', chunk):
+                creds[match[1]]=match[2]
+                last_user=None
+            else:
+                raise RuntimeError("Text credential list parse error")
+        if username and username in creds:
+            return hop.auth.Auth(username, creds[username], method=hop.auth.SASLMethod.PLAIN)
+        elif len(creds) == 1:
+            username = next(iter(creds))
+            return hop.auth.Auth(username, creds[username], method=hop.auth.SASLMethod.PLAIN)
+        else:
+            raise RuntimeError(f"Ambiguous text-format creential from secret {secret_name}")
 
     def refresh_url(self) -> bool:
         """
@@ -183,17 +256,37 @@ class Hop_consumer(Base_consumer):
 
         # interval exceeded -- reset time, and refresh topic list
         self.last_last_refresh_time = time.time()
-        # Read the available topics from the given broker
-        # notice that we are not given "public topics" we
-        # are given topics we are permitted to read. 
-        topic_dict = list_topics(url=self.base_url, auth=self.auth)
         
-        # TODO: Query the hop-auth API to find out which of these topics are supposed to be archived
+        # Query the hopauth API for topic information to determine which are marked for archiving
+        http_auth = http_scram.SCRAMAuth(self.hopauth_auth, shortcut=True)
+        resp = requests.get(f"{self.auth_api_url}/v1/topics", auth=http_auth)
+        if not resp.ok:
+            raise RuntimeError(f"Failed to contact hopauth API: {resp.status_code}")
+        topic_list = resp.json()
+        topics_to_archive = []
+        for topic_entry in topic_list:
+            if "archivable" in topic_entry and topic_entry["archivable"] \
+              and topic_entry["name"] not in self.vetoed_topics:
+                topics_to_archive.append(topic_entry["name"])
+        
+        # Check that each topic to be archived is actually visible, and if so,
+        # accumulate it onto the new URL.
+        # Sort topic names to keep URL stable when the topic list does not change.
+        topic_dict = list_topics(url=self.base_url, auth=self.kafka_auth)
+        archivable_topics = []
+        for topic_to_archive in sorted(topics_to_archive):
+            if topic_to_archive in self.vetoed_topics:
+                continue
+            if topic_to_archive not in topic_dict:
+                logging.error(f"Want to archive {topic_to_archive}, "
+                              "but it is not accessible on the broker")
+                continue;
+            archivable_topics.append(topic_to_archive)
 
         old_url = getattr(self, "url", None)
-        # Concatinate the avilable topics with the broker address
+        # Concatenate the avilable topics with the broker address
         # omit vetoed topics
-        topics = ','.join([t for t in sorted(topic_dict.keys()) if t not in self.vetoed_topics])
+        topics = ','.join(archivable_topics)
         self.url = f"{self.base_url}{topics}"
         changed: bool = self.url != old_url
         logging.info(f"Hop Url (re)configured: {self.url} excluding {self.vetoed_topics}")
@@ -207,7 +300,7 @@ class Hop_consumer(Base_consumer):
         if self.client:
             return  # if already connected, do nothing
         start_at = StartPosition.EARLIEST
-        stream = Stream(auth=self.auth, start_at=start_at, until_eos=self.until_eos)
+        stream = Stream(auth=self.kafka_auth, start_at=start_at, until_eos=self.until_eos)
 
         # Return the connection to the client as :class:"hop.io.Consumer" instance
         self.refresh_url()

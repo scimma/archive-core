@@ -145,8 +145,15 @@ class NativePostgresServer(PostgresServer):
 		if attempts == max_start_attempts:
 			failed = True
 		if failed:
+			log_data = ""
+			try:
+				with open(datadir+"/logfile", 'r') as f:
+					log_data = f.read();
+			except:
+				pass
 			raise RuntimeError(f"Failed to start postgres in {self.datadir}: \n"
-							   f"{start_result.stderr.decode('utf-8')}")
+			                   f"{start_result.stderr.decode('utf-8')}"+
+			                   (f"\nLog contents:\n{log_data}" if log_data else ""))
 		self.info = PostgresServerInfo("localhost", port)
 		
 		db_result = subprocess.run(["createdb", "-h", self.info.host, "-p", str(self.info.port)], capture_output=True)

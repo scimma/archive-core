@@ -310,6 +310,7 @@ class Mock_store(Base_store):
     """
 
     def __init__(self, config):
+        config["store_region_name"] = ""
         super().__init__(config)
         self.buckets = {}
         self.connected = False
