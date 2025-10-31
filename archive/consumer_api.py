@@ -34,7 +34,7 @@ from typing import Optional
 from urllib.parse import urlparse
 import uuid
 from hop.io import Stream, StartPosition, list_topics
-from . import http_scram
+from hop import http_scram
 from . import utility_api
 
 def ConsumerFactory(config):
