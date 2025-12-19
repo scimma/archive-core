@@ -19,6 +19,7 @@ dependencies = [
     "psycopg[binary]",
     "psycopg_pool",
     "sqlalchemy",
+    "sqlakeyset",
     "toml",
     "uvicorn[standard]",
 ]

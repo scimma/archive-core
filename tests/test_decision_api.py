@@ -16,6 +16,7 @@ async def test_is_content_identical():
         "store_type": "mock",
         "store_primary_bucket": "b1",
         "store_backup_bucket": "b2",
+	    "store_region_name": "eu-north-3"
     }
     db = database_api.DbFactory(config)
     st = store_api.StoreFactory(config)
@@ -105,6 +106,7 @@ async def test_is_deemed_duplicate():
         "store_type": "mock",
         "store_primary_bucket": "b1",
         "store_backup_bucket": "b2",
+        "store_region_name": "r",
     }
     db = database_api.DbFactory(config)
     st = store_api.StoreFactory(config)

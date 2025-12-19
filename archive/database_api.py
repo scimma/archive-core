@@ -21,14 +21,17 @@ import boto3
 from botocore.exceptions import ClientError
 import sqlalchemy
 bindparam = sqlalchemy.bindparam
-from sqlalchemy.ext.asyncio import create_async_engine, create_async_pool_from_url
+from sqlalchemy.ext.asyncio import create_async_engine, create_async_pool_from_url, AsyncSession
+from sqlakeyset.asyncio import select_page
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 import aioboto3
 import logging
-from collections import namedtuple
+from dataclasses import dataclass
 from . import utility_api
 import os
+from typing import Optional, List
+from uuid import UUID
 
 ##################################
 # "databases"
@@ -88,10 +91,21 @@ class Base_db:
     async def insert(self, metadata, annotations):
         raise NotImplementedError
 
-    MessageRecord = namedtuple("MessageRecord",
-                               ["id", "topic", "timestamp", "uuid", "size", "key",
-                                "bucket", "crc32", "is_client_uuid", "public",
-                                "direct_upload", "message_crc32"])
+    # the fields in this class must match the columns defined in SQL_db.connect
+    @dataclass
+    class MessageRecord:
+        id: int
+        topic: str
+        timestamp: int
+        uuid: UUID
+        size: int
+        key: str
+        bucket: str
+        crc32: int
+        is_client_uuid: bool
+        public: bool
+        direct_upload: bool
+        message_crc32: int
 
     async def fetch(self, uuid) -> MessageRecord:
         raise NotImplementedError
@@ -147,6 +161,70 @@ class Base_db:
         
         Return: A sequence of tuples of bucket name, key where each mesage can
                 be found in the data store.
+        """
+        raise NotImplementedError
+
+    async def get_topics_with_public_messages(self):
+        """
+        Get the names of all topics on which at least one public message is archived
+        """
+        raise NotImplementedError
+
+    async def get_message_records(self, bookmark: Optional[str]=None, page_size: int=1024,
+                                  ascending: bool=True,
+                                  topics_public: Optional[List[str]]=None,
+                                  topics_full: Optional[List[str]]=None,
+                                  start_time: Optional[int]=None,
+                                  end_time: Optional[int]=None,):
+        """
+        Get the records for messages satisfying specified criteria, with results split/batched into
+        'pages'.
+        Selecting messages by topic has some complexity: First, if neither topics_public nor
+        topics_full is specified, the default is to select public messages from any topic. If either
+        topic restriction argument is specified, no message is returned which is on a topic not
+        specified by one of the two arguments. Both arguments may be specified at the same time to
+        select a union of messages across multiple topics with different access levels.
+        
+        Args:
+            bookmark: If not None, this must be a 'bookmark' string returned by a previous call, to
+                      select another page of results.
+            page_size: The maximum number of results to return fro this call; any further results
+                       can be retrieved as subsequent 'pages'.
+            ascending: Whether the reuslts should be sorted in ascending timestamp order.
+            topics_public: If not None, only messages which are flagged as being public appearing on
+                           these topics will be returned. Can be used at the same time as
+                           topics_full.
+            topics_full: If not None, any message appearing on one of these topics is a cadidate to
+                         be returned.
+            start_time: The beginning of the message timestamp range to select.
+            end_time: The end of the message timestamp range to select. The range is half-open, so
+                      messages with this exact timestamp will be excluded.
+        Return: A tuple consisting of the results (a list of MessageRecords), a 'bookmark' which can
+                be used to fetch the next page of results or None if there are no subsequent
+                results, and a 'bookmark' for the previous page of results or None if there are no
+                prior results.
+        """
+        raise NotImplementedError
+
+    async def count_message_records(self,
+                                    topics_public: Optional[List[str]]=None,
+                                    topics_full: Optional[List[str]]=None,
+                                    start_time: Optional[int]=None,
+                                    end_time: Optional[int]=None,):
+        """
+        Count the numberof messages satisfying specified criteria, as they would be returned by
+        get_message_records.
+        
+        Args:
+            topics_public: If not None, only messages which are flagged as being public appearing on
+                           these topics will be returned. Can be used at the same time as
+                           topics_full.
+            topics_full: If not None, any message appearing on one of these topics is a cadidate to
+                         be returned.
+            start_time: The beginning of the message timestamp range to select.
+            end_time: The end of the message timestamp range to select. The range is half-open, so
+                      messages with this exact timestamp will be excluded.
+        Return: An integer count of messages
         """
         raise NotImplementedError
 
@@ -243,20 +321,110 @@ class Mock_db(Base_db):
             # TODO do what if id is not known?
         return results
 
-    async def get_message_records_for_time_range(self, topic: str, start_time: int, end_time: int, limit: int=10, offset: int=0):
+    async def get_topics_with_public_messages(self):
         assert self.connected
-        # This is not at all efficient, but should not be used for serious amounts of data
-        results = []
-        for record in sorted(self.data.values(), key=lambda r: r.timestamp):
-            if record.topic == topic and \
-              record.timestamp >= start_time and record.timestamp < end_time:
-                if offset > 0:
-                    offset -= 1
+        topics = set()
+        for record in self.data.values():
+            if record.public:
+                topics.add(record.topic)
+        return list(topics)
+
+    def _generate_query_filter(self,
+                               topics_public: Optional[List[str]]=None,
+                               topics_full: Optional[List[str]]=None,
+                               start_time: Optional[int]=None,
+                               end_time: Optional[int]=None):
+        def filter(record):
+            if topics_public is not None or topics_full is not None:
+                if topics_public is None:
+                    if record.topic not in topics_full:
+                        return False
+                elif topics_full is None:
+                    if not record.public or record.topic not in topics_public:
+                        return False
                 else:
-                    results.append(record)
-                    if limit!=0 and len(results) == limit:
-                        return results
-        return results
+                    if record.topic not in topics_full and (not record.public or record.topic not in topics_public):
+                        return False
+            elif not record.public:
+                return False
+            if start_time is not None and record.timestamp < start_time:
+                return False
+            if end_time is not None and record.timestamp >= end_time:
+                return False
+            return True
+        return filter
+
+    async def get_message_records(self, bookmark: Optional[str]=None, page_size: int=1024,
+                                  ascending: bool=True,
+                                  topics_public: Optional[List[str]]=None,
+                                  topics_full: Optional[List[str]]=None,
+                                  start_time: Optional[int]=None,
+                                  end_time: Optional[int]=None,):
+        assert self.connected
+        filter = self._generate_query_filter(topics_public, topics_full, start_time, end_time)
+        # This is not at all efficient, but should not be used for serious amounts of data
+        matching = [r for r in self.data.values() if filter(r)]
+        if len(matching) == 0:
+            return [], None, None
+        matching.sort(key=lambda r: (r.timestamp, r.id), reverse=not ascending)
+        # apply pagination
+        def make_bookmark(dir, ts, i):
+            # This is not quite the format used by sqlakeyset, but we don't need as much generality,
+            # nor is interoperability needed, and this is simpler to parse.
+            return f"{dir}{ts}~{i}"
+        if bookmark is not None:
+            assert len(bookmark) >= 4
+            direction = bookmark[0]
+            assert direction in ('<', '>')
+            ts, i = tuple(int(s) for s in bookmark[1:].split("~"))
+            if direction == '>':
+                startIdx = 0
+                while startIdx < len(matching) and matching[startIdx].timestamp < ts or \
+                  (matching[startIdx].timestamp == ts and matching[startIdx].id <= i):
+                    startIdx += 1
+                if startIdx >= len(matching):
+                    return [], None, make_bookmark('<', matching[0].timestamp, matching[0].id+1)
+                endIdx = startIdx + page_size
+                if endIdx > len(matching):
+                    endIdx = len(matching)
+            else: # '<'
+                endIdx = 0
+                while endIdx < len(matching) and matching[endIdx].timestamp < ts or \
+                  (matching[endIdx].timestamp == ts and matching[endIdx].id < i):
+                    endIdx += 1
+                if endIdx == 0:
+                    return [], make_bookmark('>', matching[0].timestamp, matching[0].id-1), None
+                startIdx = endIdx - page_size
+                if startIdx < 0:
+                    startIdx = 0
+        else:
+            startIdx = 0
+            endIdx = startIdx + page_size
+            if endIdx > len(matching):
+                endIdx = len(matching)
+        if endIdx < len(matching):
+            next = make_bookmark('>', matching[endIdx-1].timestamp, matching[endIdx-1].id)
+        else:
+            next = None
+        if startIdx > 0:
+            prev = make_bookmark('<', matching[startIdx].timestamp, matching[startIdx].id)
+        else:
+            prev = None
+        return matching[startIdx:endIdx], next, prev
+
+    async def count_message_records(self,
+                                    topics_public: Optional[List[str]]=None,
+                                    topics_full: Optional[List[str]]=None,
+                                    start_time: Optional[int]=None,
+                                    end_time: Optional[int]=None,):
+        assert self.connected
+        filter = self._generate_query_filter(topics_public, topics_full, start_time, end_time)
+        # This is not at all efficient, but should not be used for serious amounts of data
+        count = 0
+        for record in self.data.values():
+            if filter(record):
+                count += 1
+        return count
 
 class SQL_db(Base_db):
     def __init__(self, config):
@@ -282,6 +450,7 @@ class SQL_db(Base_db):
         )
         self.db_meta = sqlalchemy.MetaData()
         Column = sqlalchemy.Column
+        # the columns defined in here must match the fields in Base_db.MessageRecord
         self.table = sqlalchemy.Table(
             self.table_name,
             self.db_meta,
@@ -304,7 +473,14 @@ class SQL_db(Base_db):
 
     async def make_schema(self):
         "Declare tables"
-        ts_idx = sqlalchemy.Index(f"{self.table_name}_timestamp_idx", self.table.c.timestamp)
+        # There's generally little reason to search for specific timestamps by value, range queries
+        # are more natural. In addition, to paginate the results, we need uniqueness, so we want to
+        # use the (internal, DB) ID as well. Also, filtering based on source topic and the public
+        # flag is frequently needed, and this is much more efficient if those columns are included
+        # in the index (but not used for ordering).
+        ts_idx = sqlalchemy.Index(f"{self.table_name}_timestamp_id_idx",
+                                  self.table.c.timestamp, self.table.c.id,
+                                  postgresql_include=["topic", "public"])
         topic_idx = sqlalchemy.Index(f"{self.table_name}_topic_idx", self.table.c.topic)
         key_idx = sqlalchemy.Index(f"{self.table_name}_key_idx", self.table.c.key)
         uuid_idx = sqlalchemy.Index(f"{self.table_name}_uuid_idx", self.table.c.uuid)
@@ -448,8 +624,8 @@ class SQL_db(Base_db):
         only the id for one of them.
         """
         async with self.engine.connect() as conn:
-            result = await conn.execute(sqlalchemy.select(self.table.c.id)\
-                                        .select_from(self.table)\
+            result = await conn.execute(sqlalchemy.select(self.table.c.id)
+                                        .select_from(self.table)
                                         .where(self.table.c.uuid == bindparam("uuid")),
                                         {"uuid":uuid})
             return result.scalar()
@@ -463,25 +639,82 @@ class SQL_db(Base_db):
                 be found in the data store.
         """
         async with self.engine.connect() as conn:
-            result = await conn.execute(sqlalchemy.select(self.table.c.bucket, self.table.c.key)\
-                                        .select_from(self.table)\
+            result = await conn.execute(sqlalchemy.select(self.table.c.bucket, self.table.c.key)
+                                        .select_from(self.table)
                                         .where(self.table.c.id.in_(bindparam("ids"))),
                                         {"ids":ids})
             return result.all()
 
-    async def get_message_records_for_time_range(self, topic: str, start_time: int, end_time: int, limit: int=10, offset: int=0):
+    async def get_topics_with_public_messages(self):
         async with self.engine.connect() as conn:
-            result = await conn.execute(self.table.select()\
-                                        .where((self.table.c.topic == bindparam("topic")) &
-                                               (self.table.c.timestamp >= bindparam("start_time")) &
-                                               (self.table.c.timestamp < bindparam("end_time")))
-                                        .limit(bindparam("limit")).offset(bindparam("offset")),
-                                        {"topic":topic,
-                                         "start_time":start_time,
-                                         "end_time":end_time,
-                                         "limit":limit,
-                                         "offset":offset})
-            return [Base_db.MessageRecord(**record._mapping) for record in result.all()]
+            result = await conn.execute(sqlalchemy.select(sqlalchemy.distinct(self.table.c.topic))
+                                        .where(self.table.c.public == sqlalchemy.true()))
+            return [r[0] for r in result.all()]
+
+    def _generate_query_restrictions(self, q,
+                                     topics_public: Optional[List[str]]=None,
+                                     topics_full: Optional[List[str]]=None,
+                                     start_time: Optional[int]=None,
+                                     end_time: Optional[int]=None):
+        if topics_public is not None or topics_full is not None:
+            if topics_public is not None and len(topics_public) > 0:
+                if len(topics_public) == 1:
+                    pub_clause = sqlalchemy.and_(self.table.c.public == sqlalchemy.true(),
+                                                 self.table.c.topic == topics_public[0])
+                else:
+                    pub_clause = sqlalchemy.and_(self.table.c.public == sqlalchemy.true(),
+                                                 self.table.c.topic.in_(topics_public))
+            else:
+                pub_clause = None
+            if topics_full is not None and len(topics_full) > 0:
+                if len(topics_full) == 1:
+                    full_clause = self.table.c.topic == topics_full[0]
+                else:
+                    full_clause = self.table.c.topic.in_(topics_full)
+            else:
+                full_clause = None
+            if pub_clause is not None and full_clause is not None:
+                q = q.where(sqlalchemy.or_(pub_clause, full_clause))
+            elif pub_clause is not None:
+                q = q.where(pub_clause)
+            elif full_clause is not None:
+                q = q.where(full_clause)
+        else: # if no topics specified, select public messages across all topics
+            q = q.where(self.table.c.public == sqlalchemy.true())
+        if start_time is not None:
+            q = q.where(self.table.c.timestamp >= start_time)
+        if end_time is not None:
+            q = q.where(self.table.c.timestamp < end_time)
+        return q
+
+    async def get_message_records(self, bookmark: Optional[str]=None, page_size: int=1024,
+                                  ascending: bool=True,
+                                  topics_public: Optional[List[str]]=None,
+                                  topics_full: Optional[List[str]]=None,
+                                  start_time: Optional[int]=None,
+                                  end_time: Optional[int]=None,):
+        q = self.table.select()
+        if ascending:
+            q = q.order_by(self.table.c.timestamp, self.table.c.id)
+        else:
+            q = q.order_by(sqlalchemy.desc(self.table.c.timestamp),
+                           sqlalchemy.desc(self.table.c.id))
+        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
+        async with AsyncSession(self.engine) as session:
+            page = await select_page(session, q, per_page=page_size, page=bookmark)
+        return ([Base_db.MessageRecord(*r) for r in page],
+                page.paging.bookmark_next if page.paging.has_next else None,
+                page.paging.bookmark_previous if page.paging.has_previous else None,)
+
+    async def count_message_records(self, topics_public: Optional[List[str]]=None,
+                                    topics_full: Optional[List[str]]=None,
+                                    start_time: Optional[int]=None,
+                                    end_time: Optional[int]=None,):
+        q = sqlalchemy.select(sqlalchemy.func.count()).select_from(self.table)
+        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
+        async with AsyncSession(self.engine) as session:
+            count = (await session.execute(q)).scalar()
+        return count
 
 
 class AWS_db(SQL_db):

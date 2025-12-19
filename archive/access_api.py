@@ -7,6 +7,7 @@ users. and as a shim for trusted co-developers.
 """
 import bson
 import logging
+from typing import Optional, List
 from . import database_api
 from . import decision_api
 from . import store_api
@@ -47,10 +48,6 @@ class Archive_access():
     async def get_metadata(self, uuid):
         "get metadata, if any associated with a message with the given ID"
         return await self.db.fetch(uuid)
-    
-    async def get_metadata_for_time_range(self, topic: str, start_time: int, end_time: int, limit: int=10, offset: int=0):
-        "get metadata, if any associated with a message with the given ID"
-        return await self.db.get_message_records_for_time_range(topic, start_time, end_time, limit, offset)
     
     async def get_object_lazily(self, key):
         """
@@ -97,3 +94,58 @@ class Archive_access():
                 {"archive_uuid": annotations["con_text_uuid"],
                  "is_client_uuid": annotations["con_is_client_uuid"]},
                 "")
+
+    async def get_topics_with_public_messages(self):
+        """
+        Get the names of all topics on which at least one public message is archived
+        """
+        return await self.db.get_topics_with_public_messages()
+    
+    async def get_message_records(self, *args, **kwargs):
+        """
+        Get the records for messages satisfying specified criteria, with results split/batched into
+        'pages'.
+        Selecting messages by topic has some complexity: First, if neither topics_public nor
+        topics_full is specified, the default is to select public messages from any topic. If either
+        topic restriction argument is specified, no message is returned which is on a topic not
+        specified by one of the two arguments. Both arguments may be specified at the same time to
+        select a union of messages across multiple topics with different access levels.
+        
+        Args:
+            bookmark: If not None, this must be a 'bookmark' string returned by a previous call, to
+                      select another page of results.
+            page_size: The maximum number of results to return fro this call; any further results
+                       can be retrieved as subsequent 'pages'. 
+            ascending: Whether the reuslts should be sorted in ascending timestamp order.
+            topics_public: If not None, only messages which are flagged as being public appearing on
+                           these topics will be returned. Can be used at the same time as
+                           topics_full.
+            topics_full: If not None, any message appearing on one of these topics is a cadidate to
+                         be returned.
+            start_time: The beginning of the message timestamp range to select.
+            end_time: The end of the message timestamp range to select. The range is half-open, so
+                      messages with this exact timestamp will be excluded.
+        Return: A tuple consisting of the results (a list of MessageRecords), a 'bookmark' which can
+                be used to fetch the next page of results or None if there are no subsequent
+                results, and a 'bookmark' for the previous page of results or None if there are no
+                prior results.
+        """
+        return await self.db.get_message_records(*args, **kwargs)
+    
+    async def count_message_records(self, *args, **kwargs):
+        """
+        Count the numberof messages satisfying specified criteria, as they would be returned by
+        get_message_records.
+        
+        Args:
+            topics_public: If not None, only messages which are flagged as being public appearing on
+                           these topics will be returned. Can be used at the same time as
+                           topics_full.
+            topics_full: If not None, any message appearing on one of these topics is a cadidate to
+                         be returned.
+            start_time: The beginning of the message timestamp range to select.
+            end_time: The end of the message timestamp range to select. The range is half-open, so
+                      messages with this exact timestamp will be excluded.
+        Return: An integer count of messages
+        """
+        return await self.db.count_message_records(*args, **kwargs)
