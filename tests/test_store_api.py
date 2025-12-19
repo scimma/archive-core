@@ -175,7 +175,8 @@ async def test_Mock_store_store_readonly(tmpdir):
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
-	st = store_api.Mock_store({"store_primary_bucket": "a", "store_backup_bucket": "b"})
+	st = store_api.Mock_store({"store_primary_bucket": "a", "store_backup_bucket": "b",
+	                           "store_region_name": "r"})
 	await st.set_read_only()
 	await st.connect()
 	
@@ -193,7 +194,8 @@ async def test_Mock_store_deep_delete(tmpdir):
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
 	annotations = decision_api.get_annotations(message, metadata.headers)
 
-	st = store_api.Mock_store({"store_primary_bucket": "a", "store_backup_bucket": "b"})
+	st = store_api.Mock_store({"store_primary_bucket": "a", "store_backup_bucket": "b",
+	                           "store_region_name": "r"})
 	await st.connect()
 	await st.store(message, metadata, annotations)
 	assert await st.get_object(annotations["key"]) is not None
@@ -216,7 +218,7 @@ async def test_Mock_store_deep_delete(tmpdir):
 
 def test_Base_store_unimplemented():
 	bs = store_api.Base_store({"store_primary_bucket": "a", "store_backup_bucket": "b",
-	                           "store_region_name": "nowhere"})
+	                           "store_region_name": "r"})
 	with pytest.raises(NotImplementedError):
 		bs.get_object("akey")
 	with pytest.raises(NotImplementedError):

@@ -30,7 +30,8 @@ def get_mock_config():
     return {"db_type": "mock",
             "store_type": "mock",
             "store_primary_bucket": "archive",
-            "store_backup_bucket": "backup"}
+            "store_backup_bucket": "backup",
+	        "store_region_name": "eu-north-3"}
 
 @pytest.mark.asyncio
 async def test_archive_access_startup_shutdown():
@@ -88,7 +89,7 @@ async def test_archive_access_store_message_no_uuid():
     r = await aa.store_message(message, metadata)
     assert r[0], "Insertion should succeed"
     
-    dr = await aa.db.get_message_records_for_time_range("t1", start_time=355, end_time=357)
+    dr, _, _ = await aa.get_message_records(topics_full=["t1"])
     assert len(dr) == 1, "Message should be recorded in database"
     assert dr[0].topic == metadata.topic
     assert dr[0].timestamp == metadata.timestamp
@@ -143,7 +144,24 @@ async def test_archive_access_get_metadata():
     assert r.uuid == str(u)
 
 @pytest.mark.asyncio
-async def test_archive_access_get_metadata_for_time_range():
+async def test_archive_access_get_topics_with_public_messages():
+    messages = []
+    for i in range(0,10):
+        ms = b"datadatadata"
+        md = Metadata(topic=f"t{i}", partition=0, offset=i, timestamp=i, key="", headers=[("_id",uuid.uuid4().bytes)], _raw=None)
+        messages.append((ms,md))
+    
+    aa = access_api.Archive_access(get_mock_config())
+    await aa.connect()
+    
+    for m in messages:
+        await aa.store_message(m[0],m[1], public=(m[1].offset % 2 == 0))
+    
+    pub_top = await aa.get_topics_with_public_messages()
+    assert len(pub_top) == 5
+
+@pytest.mark.asyncio
+async def test_archive_access_get_message_records():
     messages = []
     for i in range(0,10):
         ms = b"datadatadata"
@@ -156,27 +174,58 @@ async def test_archive_access_get_metadata_for_time_range():
     for m in messages:
         await aa.store_message(m[0],m[1])
     
-    r = await aa.get_metadata_for_time_range("t1", start_time=4, end_time=7)
+    r, _, _ = await aa.get_message_records(topics_full=["t1"], start_time=4, end_time=7)
     assert len(r) == 3
     assert r[0].timestamp == 4
     assert r[1].timestamp == 5
     assert r[2].timestamp == 6
     
-    r = await aa.get_metadata_for_time_range("t1", start_time=3, end_time=7, limit=2)
+    r, n, p = await aa.get_message_records(topics_full=["t1"], start_time=3, end_time=7, page_size=2)
     assert len(r) == 2
     assert r[0].timestamp == 3
     assert r[1].timestamp == 4
+    assert n is not None
+    assert p is None
     
-    r = await aa.get_metadata_for_time_range("t1", start_time=3, end_time=7, limit=2, offset=2)
+    r, n, p = await aa.get_message_records(topics_full=["t1"], start_time=3, end_time=7, page_size=2, bookmark=n)
     assert len(r) == 2
     assert r[0].timestamp == 5
     assert r[1].timestamp == 6
+    assert n is None
+    assert p is not None
     
-    r = await aa.get_metadata_for_time_range("t1", start_time=12, end_time=14)
+    r, n, p = await aa.get_message_records(topics_full=["t1"], start_time=12, end_time=14)
     assert len(r) == 0
+    assert n is None
+    assert p is None
     
-    r = await aa.get_metadata_for_time_range("t2", start_time=0, end_time=5)
+    r, n, p = await aa.get_message_records(topics_full=["t2"], start_time=0, end_time=5)
     assert len(r) == 0
+    assert n is None
+    assert p is None
+
+@pytest.mark.asyncio
+async def test_archive_access_count_message_records():
+    messages = []
+    for i in range(0,10):
+        ms = b"datadatadata"
+        md = Metadata(topic="t1", partition=0, offset=i, timestamp=i, key="", headers=[("_id",uuid.uuid4().bytes)], _raw=None)
+        messages.append((ms,md))
+    
+    aa = access_api.Archive_access(get_mock_config())
+    await aa.connect()
+    
+    for m in messages:
+        await aa.store_message(m[0],m[1])
+    
+    c = await aa.count_message_records(topics_full=["t1"], start_time=4, end_time=7)
+    assert c == 3
+    
+    c = await aa.count_message_records(topics_full=["t1"], start_time=12, end_time=14)
+    assert c == 0
+    
+    c = await aa.count_message_records(topics_full=["t2"], start_time=0, end_time=5)
+    assert c == 0
 
 @pytest.mark.asyncio
 async def test_archive_access_get_object_lazily():
