@@ -21,6 +21,7 @@ This moodule supports
 #################
 
 import bson
+from datetime import datetime, timezone, timedelta
 import logging
 import uuid
 import zlib
@@ -70,6 +71,9 @@ def get_annotations(message, headers=[], public: bool=True, direct_upload: bool=
 	
 	Return: A dictionary of annotations
 	"""
+	ingest_time = datetime.now(timezone.utc)
+	# convert to a unix timestamp, and then to milliseconds
+	its = int((receive_time-datetime(1970, 1, 1, tzinfo=timezone.utc))/timedelta(milliseconds=1))
 	annotations = {}
 	text_uuid, is_client_uuid  = get_text_uuid(headers)
 	annotations["con_text_uuid"] = text_uuid
@@ -77,6 +81,7 @@ def get_annotations(message, headers=[], public: bool=True, direct_upload: bool=
 	annotations["con_message_crc32"] =  message.crc32() if hasattr(message, "crc32") else zlib.crc32(message)
 	annotations["public"] =  public
 	annotations["direct_upload"] =  direct_upload
+	annotations["ingest_time"] = its
 	return annotations
 
 
