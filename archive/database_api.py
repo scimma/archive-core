@@ -19,6 +19,7 @@ extention to SQLite.
 
 import boto3
 from botocore.exceptions import ClientError
+import importlib.util
 import sqlalchemy
 bindparam = sqlalchemy.bindparam
 from sqlalchemy.ext.asyncio import create_async_engine, create_async_pool_from_url, AsyncSession
@@ -88,7 +89,7 @@ class Base_db:
         elif self.n_inserted % self.log_every == 0:
             logging.info(msg1)
 
-    async def insert(self, metadata, annotations):
+    async def insert(self, metadata, annotations, text_to_index=""):
         raise NotImplementedError
 
     # the fields in this class must match the columns defined in SQL_db.connect
@@ -106,6 +107,10 @@ class Base_db:
         public: bool
         direct_upload: bool
         message_crc32: int
+        title: str
+        sender: str
+        media_type: str
+        file_name: str
 
     async def fetch(self, uuid) -> MessageRecord:
         raise NotImplementedError
@@ -237,6 +242,7 @@ class Mock_db(Base_db):
         logging.info(f"Mock Database configured")
         super().__init__(config)
         self.data = {}
+        self.text_index = []
         self.next_id = 0
         self.connected = False
 
@@ -246,7 +252,7 @@ class Mock_db(Base_db):
     async def close(self):
         self.connected = False
 
-    async def insert(self, metadata, annotations):
+    async def insert(self, metadata, annotations, text_to_index=""):
         if self.read_only:
             raise RuntimeError("This database object is set to read-only; insert is forbidden")
         assert self.connected
@@ -263,10 +269,15 @@ class Mock_db(Base_db):
                   is_client_uuid = annotations['con_is_client_uuid'],
                   public = annotations['public'],
                   direct_upload = annotations['direct_upload'],
-                  message_crc32 = annotations['con_message_crc32']
+                  message_crc32 = annotations['con_message_crc32'],
+                  title = annotations['title'],
+                  sender = annotations['sender'],
+                  media_type = annotations['media_type'],
+                  file_name = annotations['file_name'],
                   )
         self.data[value.id] = value
         self.next_id += 1
+        self.text_index.append((text_to_index, annotations['con_text_uuid']))
 
     async def fetch(self, uuid) -> Base_db.MessageRecord:
         assert self.connected
@@ -436,7 +447,7 @@ class SQL_db(Base_db):
         self.host      = config.get("db_host", None)
         self.port      = config.get("db_port", 5432)
         self.maxconn   = config.get("db_pool_size", 16)
-        self.table_name = config.get("db_table", "messages")
+        self.messages_table_name = config.get("db_table", "messages")
 
     async def connect(self):
         "create  a session to postgres"
@@ -447,59 +458,73 @@ class SQL_db(Base_db):
         self.engine = create_async_engine(
             url=f"postgresql+psycopg://{self.user_name}:{self.password}@{self.host}:{self.port}/{self.db_name}",
             pool_size  = self.maxconn,
+            echo = True,
         )
         self.db_meta = sqlalchemy.MetaData()
         Column = sqlalchemy.Column
         # the columns defined in here must match the fields in Base_db.MessageRecord
-        self.table = sqlalchemy.Table(
-            self.table_name,
+        self.messages_table = sqlalchemy.Table(
+            self.messages_table_name,
             self.db_meta,
             Column("id", sqlalchemy.dialects.postgresql.BIGINT, primary_key=True),
-            Column("topic", sqlalchemy.dialects.postgresql.TEXT),
-            Column("timestamp", sqlalchemy.dialects.postgresql.BIGINT),
-            Column("uuid", sqlalchemy.dialects.postgresql.UUID),
-            Column("size", sqlalchemy.dialects.postgresql.INTEGER),
-            Column("key", sqlalchemy.dialects.postgresql.TEXT),
-            Column("bucket", sqlalchemy.dialects.postgresql.TEXT),
-            Column("crc32", sqlalchemy.dialects.postgresql.BIGINT),
-            Column("is_client_uuid", sqlalchemy.dialects.postgresql.BOOLEAN),
-            Column("public", sqlalchemy.dialects.postgresql.BOOLEAN),
-            Column("direct_upload", sqlalchemy.dialects.postgresql.BOOLEAN),
-            Column("message_crc32", sqlalchemy.dialects.postgresql.BIGINT),
+            Column("topic", sqlalchemy.dialects.postgresql.TEXT, nullable=False),
+            Column("timestamp", sqlalchemy.dialects.postgresql.BIGINT, nullable=False),
+            Column("uuid", sqlalchemy.dialects.postgresql.UUID, nullable=False),
+            Column("size", sqlalchemy.dialects.postgresql.INTEGER, nullable=False),
+            Column("key", sqlalchemy.dialects.postgresql.TEXT, nullable=False),
+            Column("bucket", sqlalchemy.dialects.postgresql.TEXT, nullable=False),
+            Column("crc32", sqlalchemy.dialects.postgresql.BIGINT, nullable=False),
+            Column("is_client_uuid", sqlalchemy.dialects.postgresql.BOOLEAN, nullable=False),
+            Column("public", sqlalchemy.dialects.postgresql.BOOLEAN, nullable=False),
+            Column("direct_upload", sqlalchemy.dialects.postgresql.BOOLEAN, nullable=False),
+            Column("message_crc32", sqlalchemy.dialects.postgresql.BIGINT, nullable=False),
+            Column("title", sqlalchemy.dialects.postgresql.TEXT, nullable=False, default=""),
+            Column("sender", sqlalchemy.dialects.postgresql.TEXT, nullable=False, default=""),
+            Column("media_type", sqlalchemy.dialects.postgresql.TEXT, nullable=False, default=""),
+            Column("file_name", sqlalchemy.dialects.postgresql.TEXT, nullable=False, default=""),
+        )
+        self.ts_table = sqlalchemy.Table(
+            "message_ts",
+            self.db_meta,
+            Column("uuid", sqlalchemy.dialects.postgresql.UUID, sqlalchemy.ForeignKey("user.user_id"), nullable=False),
+            Column("text_data", sqlalchemy.dialects.postgresql.TSVECTOR, nullable=False),
+            Column("text_fully_indexed", sqlalchemy.dialects.postgresql.BOOLEAN, nullable=False),
+        )
+        self.topic_table = sqlalchemy.Table(
+            "topics",
+            self.db_meta,
+            Column("topic", sqlalchemy.dialects.postgresql.TEXT, nullable=False),
+            Column("e_timestamp", sqlalchemy.dialects.postgresql.BIGINT, nullable=False),
+            Column("l_timestamp", sqlalchemy.dialects.postgresql.BIGINT, nullable=False),
+            Column("n_messages", sqlalchemy.dialects.postgresql.BIGINT, nullable=False),
         )
 
     async def close(self):
         await self.engine.dispose()
 
     async def make_schema(self):
-        "Declare tables"
-        # There's generally little reason to search for specific timestamps by value, range queries
-        # are more natural. In addition, to paginate the results, we need uniqueness, so we want to
-        # use the (internal, DB) ID as well. Also, filtering based on source topic and the public
-        # flag is frequently needed, and this is much more efficient if those columns are included
-        # in the index (but not used for ordering).
-        ts_idx = sqlalchemy.Index(f"{self.table_name}_timestamp_id_idx",
-                                  self.table.c.timestamp, self.table.c.id,
-                                  postgresql_include=["topic", "public"])
-        topic_idx = sqlalchemy.Index(f"{self.table_name}_topic_idx", self.table.c.topic)
-        key_idx = sqlalchemy.Index(f"{self.table_name}_key_idx", self.table.c.key)
-        uuid_idx = sqlalchemy.Index(f"{self.table_name}_uuid_idx", self.table.c.uuid)
+        mod_path = os.path.dirname(importlib.util.find_spec("archive").origin)
+        migration_dir = os.path.join(mod_path, "migrations")
         async with self.engine.connect() as conn:
-            await conn.execute(sqlalchemy.sql.ddl.CreateTable(self.table, if_not_exists=True))
-            await conn.execute(sqlalchemy.sql.ddl.CreateIndex(ts_idx, if_not_exists=True))
-            await conn.execute(sqlalchemy.sql.ddl.CreateIndex(topic_idx, if_not_exists=True))
-            await conn.execute(sqlalchemy.sql.ddl.CreateIndex(key_idx, if_not_exists=True))
-            await conn.execute(sqlalchemy.sql.ddl.CreateIndex(uuid_idx, if_not_exists=True))
-            await conn.commit()
+            filenames = os.listdir(migration_dir)
+            filenames.sort()
+            for filename in filenames:
+                logging.info(f"Running migration {filename}")
+                if not filename.endswith(".sql"):
+                    continue
+                with open(os.path.join(migration_dir, filename), 'r') as f:
+                    # escape '%' characters to make code survive sqlalchemy using the % operator on it
+                    ddl = sqlalchemy.DDL(f.read().replace("%", "%%"))
+                await conn.execute(ddl)
 
-    async def insert(self, metadata, annotations):
+    async def insert(self, metadata, annotations, text_to_index=""):
         "insert one record into the DB"
         if self.read_only:
             raise RuntimeError("This database object is set to read-only; insert is forbidden")
 
         async with self.engine.connect() as conn:
             await conn.execute(
-                self.table.insert().values(
+                self.messages_table.insert().values(
                     topic = metadata.topic,
                     timestamp = metadata.timestamp,
                     uuid = annotations['con_text_uuid'],
@@ -511,11 +536,35 @@ class SQL_db(Base_db):
                     public = annotations['public'],
                     direct_upload = annotations['direct_upload'],
                     message_crc32 = annotations['con_message_crc32'],
+                    title = annotations['title'],
+                    sender = annotations['sender'],
+                    media_type = annotations['media_type'],
+                    file_name = annotations['file_name'],
+                )
+            )
+            await conn.execute(
+                self.ts_table.insert().values(
+                    uuid = annotations['con_text_uuid'],
+                    text_data = sqlalchemy.func.to_tsvector(text_to_index),
+                    text_fully_indexed = annotations.get("text_fully_indexed", False),
                 )
             )
             await conn.commit()
         self.n_inserted +=1
         self.log()
+
+    async def set_indexed_text(self, message_uuid, text_to_index, fully_indexed, is_update: bool=True):
+        operation = sqlalchemy.insert if not is_update else sqlalchemy.update
+        async with self.engine.connect() as conn:
+            stmt = operation(self.ts_table).values(
+                uuid = message_uuid,
+                text_data = sqlalchemy.func.to_tsvector(text_to_index),
+                text_fully_indexed = fully_indexed,
+            )
+            if is_update:
+                stmt = stmt.where(self.ts_table.c.uuid == message_uuid)
+            result = await conn.execute(stmt)
+            await conn.commit()
 
     async def fetch(self, uuid) -> Base_db.MessageRecord:
         """
@@ -525,8 +574,8 @@ class SQL_db(Base_db):
                  matching row was found.
         """
         async with self.engine.connect() as conn:
-            result = await conn.execute(self.table.select()\
-                                        .where(self.table.c.uuid == bindparam("uuid")),
+            result = await conn.execute(self.messages_table.select()\
+                                        .where(self.messages_table.c.uuid == bindparam("uuid")),
                                         {"uuid":uuid})
             record = result.first()
             if record is None:
@@ -539,8 +588,8 @@ class SQL_db(Base_db):
         """
         async with self.engine.connect() as conn:
             result = await conn.execute(sqlalchemy.select(sqlalchemy.func.count())\
-                                        .select_from(self.table)\
-                                        .where(self.table.c.uuid == bindparam("uuid")),
+                                        .select_from(self.messages_table)\
+                                        .where(self.messages_table.c.uuid == bindparam("uuid")),
                                         {"uuid":uuid})
             return result.scalar() or False
 
@@ -551,10 +600,10 @@ class SQL_db(Base_db):
         """
         async with self.engine.connect() as conn:
             result = await conn.execute(sqlalchemy.select(sqlalchemy.func.count())\
-                                        .select_from(self.table)\
-                                        .where((self.table.c.timestamp == bindparam("timestamp")) &
-                                               (self.table.c.topic == bindparam("topic")) &
-                                               (self.table.c.message_crc32 == bindparam("crc32"))),
+                                        .select_from(self.messages_table)\
+                                        .where((self.messages_table.c.timestamp == bindparam("timestamp")) &
+                                               (self.messages_table.c.topic == bindparam("topic")) &
+                                               (self.messages_table.c.message_crc32 == bindparam("crc32"))),
                                         {"timestamp":timestamp,
                                          "topic":topic,
                                          "crc32":message_crc32})
@@ -571,11 +620,11 @@ class SQL_db(Base_db):
     
         """
         async with self.engine.connect() as conn:
-            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.max(self.table.c.id),
-                                                          self.table.c.uuid,
+            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.max(self.messages_table.c.id),
+                                                          self.messages_table.c.uuid,
                                                           sqlalchemy.func.count())
-                                        .select_from(self.table)
-                                        .group_by(self.table.c.uuid)
+                                        .select_from(self.messages_table)
+                                        .group_by(self.messages_table.c.uuid)
                                         .having(sqlalchemy.func.count() > 1)
                                         .limit(bindparam("limit")),
                                         {"limit":limit}
@@ -587,15 +636,15 @@ class SQL_db(Base_db):
         List messages which are probably duplicated based on their content checksums
         """
         async with self.engine.connect() as conn:
-            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.max(self.table.c.id),
-                                                          self.table.c.topic,
-                                                          self.table.c.timestamp,
-                                                          self.table.c.message_crc32,
+            result = await conn.execute(sqlalchemy.select(sqlalchemy.func.max(self.messages_table.c.id),
+                                                          self.messages_table.c.topic,
+                                                          self.messages_table.c.timestamp,
+                                                          self.messages_table.c.message_crc32,
                                                           sqlalchemy.func.count())
-                                        .select_from(self.table)
-                                        .group_by(self.table.c.topic,
-                                                  self.table.c.timestamp,
-                                                  self.table.c.message_crc32)
+                                        .select_from(self.messages_table)
+                                        .group_by(self.messages_table.c.topic,
+                                                  self.messages_table.c.timestamp,
+                                                  self.messages_table.c.message_crc32)
                                         .having(sqlalchemy.func.count() > 1)
                                         .limit(bindparam("limit")),
                                         {"limit":limit}
@@ -624,9 +673,9 @@ class SQL_db(Base_db):
         only the id for one of them.
         """
         async with self.engine.connect() as conn:
-            result = await conn.execute(sqlalchemy.select(self.table.c.id)
-                                        .select_from(self.table)
-                                        .where(self.table.c.uuid == bindparam("uuid")),
+            result = await conn.execute(sqlalchemy.select(self.messages_table.c.id)
+                                        .select_from(self.messages_table)
+                                        .where(self.messages_table.c.uuid == bindparam("uuid")),
                                         {"uuid":uuid})
             return result.scalar()
 
@@ -639,16 +688,16 @@ class SQL_db(Base_db):
                 be found in the data store.
         """
         async with self.engine.connect() as conn:
-            result = await conn.execute(sqlalchemy.select(self.table.c.bucket, self.table.c.key)
-                                        .select_from(self.table)
-                                        .where(self.table.c.id.in_(bindparam("ids"))),
+            result = await conn.execute(sqlalchemy.select(self.messages_table.c.bucket, self.messages_table.c.key)
+                                        .select_from(self.messages_table)
+                                        .where(self.messages_table.c.id.in_(bindparam("ids"))),
                                         {"ids":ids})
             return result.all()
 
     async def get_topics_with_public_messages(self):
         async with self.engine.connect() as conn:
-            result = await conn.execute(sqlalchemy.select(sqlalchemy.distinct(self.table.c.topic))
-                                        .where(self.table.c.public == sqlalchemy.true()))
+            result = await conn.execute(sqlalchemy.select(sqlalchemy.distinct(self.messages_table.c.topic))
+                                        .where(self.messages_table.c.public == sqlalchemy.true()))
             return [r[0] for r in result.all()]
 
     def _generate_query_restrictions(self, q,
@@ -659,18 +708,18 @@ class SQL_db(Base_db):
         if topics_public is not None or topics_full is not None:
             if topics_public is not None and len(topics_public) > 0:
                 if len(topics_public) == 1:
-                    pub_clause = sqlalchemy.and_(self.table.c.public == sqlalchemy.true(),
-                                                 self.table.c.topic == topics_public[0])
+                    pub_clause = sqlalchemy.and_(self.messages_table.c.public == sqlalchemy.true(),
+                                                 self.messages_table.c.topic == topics_public[0])
                 else:
-                    pub_clause = sqlalchemy.and_(self.table.c.public == sqlalchemy.true(),
-                                                 self.table.c.topic.in_(topics_public))
+                    pub_clause = sqlalchemy.and_(self.messages_table.c.public == sqlalchemy.true(),
+                                                 self.messages_table.c.topic.in_(topics_public))
             else:
                 pub_clause = None
             if topics_full is not None and len(topics_full) > 0:
                 if len(topics_full) == 1:
-                    full_clause = self.table.c.topic == topics_full[0]
+                    full_clause = self.messages_table.c.topic == topics_full[0]
                 else:
-                    full_clause = self.table.c.topic.in_(topics_full)
+                    full_clause = self.messages_table.c.topic.in_(topics_full)
             else:
                 full_clause = None
             if pub_clause is not None and full_clause is not None:
@@ -680,11 +729,11 @@ class SQL_db(Base_db):
             elif full_clause is not None:
                 q = q.where(full_clause)
         else: # if no topics specified, select public messages across all topics
-            q = q.where(self.table.c.public == sqlalchemy.true())
+            q = q.where(self.messages_table.c.public == sqlalchemy.true())
         if start_time is not None:
-            q = q.where(self.table.c.timestamp >= start_time)
+            q = q.where(self.messages_table.c.timestamp >= start_time)
         if end_time is not None:
-            q = q.where(self.table.c.timestamp < end_time)
+            q = q.where(self.messages_table.c.timestamp < end_time)
         return q
 
     async def get_message_records(self, bookmark: Optional[str]=None, page_size: int=1024,
@@ -693,13 +742,51 @@ class SQL_db(Base_db):
                                   topics_full: Optional[List[str]]=None,
                                   start_time: Optional[int]=None,
                                   end_time: Optional[int]=None,):
-        q = self.table.select()
+        all_topics = (topics_public or []) + (topics_full or [])
+        primary_order_key = self.messages_table.c.timestamp
+        time_hint = None
+        if len(all_topics) != 0:
+            # if filtering by topics, target data may be 'clumpy' within the table, leading to
+            # poor performance fetching it.
+            # try to guess based on the fraction of the table the target topics
+            # occupy whether an index scan is suitable or not
+            tq = sqlalchemy.select(sqlalchemy.sql.func.sum(self.topic_table.c.n_messages))
+            cq = tq.where(self.topic_table.c.topic.in_(all_topics))
+            async with self.engine.connect() as conn:
+                r = await conn.execute(sqlalchemy.union_all(cq,tq))
+                # order of union results is not gauranteed, but if one value is smaller, it must
+                # be the subset count, and the larger the total. 
+                c, t = sorted([row[0] for row in r.all()])
+            logging.debug(f"Count of messages on target topics is {c}, fraction is {c/t}")
+            if c/t < 0.002:
+                # This seemingly-pointless addition is to try to suppress use of the main,
+                # time-ordered index when searching for messages on sparse topics.
+                # The disadvantage of suppressing use of the time-ordered index is the need to
+                # collect andsort potentially many candidate result rows.
+                primary_order_key = primary_order_key + 0
+            elif bookmark is None and start_time is None and end_time is None:
+                # if attempting to find the first page (in either order) with no time restrictions,
+                # scanning the time-ordered index from one end may be slow if there are many other
+                # rows 'in the way'; try to add a time restriction based on metadata to skip them.
+                if ascending:
+                    time_hint = self.messages_table.c.timestamp >= \
+                                sqlalchemy.select(sqlalchemy.sql.func.min(self.topic_table.c.e_timestamp)) \
+                                .where(self.topic_table.c.topic.in_(all_topics)).scalar_subquery()
+                else:
+                    time_hint = self.messages_table.c.timestamp <= \
+                                sqlalchemy.select(sqlalchemy.sql.func.max(self.topic_table.c.l_timestamp)) \
+                                .where(self.topic_table.c.topic.in_(all_topics)).scalar_subquery()
+                
+        
+        q = self.messages_table.select()
         if ascending:
-            q = q.order_by(self.table.c.timestamp, self.table.c.id)
+            q = q.order_by(primary_order_key, self.messages_table.c.id)
         else:
-            q = q.order_by(sqlalchemy.desc(self.table.c.timestamp),
-                           sqlalchemy.desc(self.table.c.id))
+            q = q.order_by(sqlalchemy.desc(primary_order_key),
+                           sqlalchemy.desc(self.messages_table.c.id))
         q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
+        if time_hint is not None:
+            q = q.where(time_hint)
         async with AsyncSession(self.engine) as session:
             page = await select_page(session, q, per_page=page_size, page=bookmark)
         return ([Base_db.MessageRecord(*r) for r in page],
@@ -710,11 +797,80 @@ class SQL_db(Base_db):
                                     topics_full: Optional[List[str]]=None,
                                     start_time: Optional[int]=None,
                                     end_time: Optional[int]=None,):
-        q = sqlalchemy.select(sqlalchemy.func.count()).select_from(self.table)
+        q = sqlalchemy.select(sqlalchemy.func.count()).select_from(self.messages_table)
         q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
         async with AsyncSession(self.engine) as session:
             count = (await session.execute(q)).scalar()
         return count
+
+    async def search_message_text(self, query,
+                                  bookmark: Optional[str]=None, page_size: int=1024,
+                                  ascending: bool=True,
+                                  topics_public: Optional[List[str]]=None,
+                                  topics_full: Optional[List[str]]=None,
+                                  start_time: Optional[int]=None,
+                                  end_time: Optional[int]=None,):
+        j = sqlalchemy.join(self.messages_table, self.ts_table,
+                            self.messages_table.c.uuid == self.ts_table.c.uuid)
+        q = self.messages_table.select().select_from(j).where(self.ts_table.c.text_data.op("@@")(sqlalchemy.func.websearch_to_tsquery(query)))
+        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
+        if ascending:
+            q = q.order_by(self.messages_table.c.timestamp, self.messages_table.c.id)
+        else:
+            q = q.order_by(sqlalchemy.desc(self.messages_table.c.timestamp),
+                           sqlalchemy.desc(self.messages_table.c.id))
+        async with AsyncSession(self.engine) as session:
+            page = await select_page(session, q, per_page=page_size, page=bookmark)
+        return ([Base_db.MessageRecord(*r) for r in page],
+                page.paging.bookmark_next if page.paging.has_next else None,
+                page.paging.bookmark_previous if page.paging.has_previous else None,)
+
+    async def count_text_search_results(self, query,
+                                        topics_public: Optional[List[str]]=None,
+                                        topics_full: Optional[List[str]]=None,
+                                        start_time: Optional[int]=None,
+                                        end_time: Optional[int]=None,):
+        j = sqlalchemy.join(self.messages_table, self.ts_table,
+                            self.messages_table.c.uuid == self.ts_table.c.uuid)
+        q = sqlalchemy.select(sqlalchemy.func.count()).select_from(j).where(self.ts_table.c.text_data.op("@@")(sqlalchemy.func.websearch_to_tsquery(query)))
+        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
+        async with AsyncSession(self.engine) as session:
+            count = (await session.execute(q)).scalar()
+        return count
+
+    async def get_messages_not_text_indexed(self, bookmark: Optional[str]=None, page_size: int=1024,
+                                            start_time: Optional[int]=None,
+                                            end_time: Optional[int]=None):
+        j = sqlalchemy.join(self.messages_table, self.ts_table,
+                            self.messages_table.c.uuid == self.ts_table.c.uuid, isouter=True)
+        q = self.messages_table.select().select_from(j).where(self.ts_table.c.uuid == None)
+        if start_time is not None:
+            q = q.where(self.messages_table.c.timestamp >= start_time)
+        if end_time is not None:
+            q = q.where(self.messages_table.c.timestamp < end_time)
+        q = q.order_by(self.messages_table.c.timestamp, self.messages_table.c.id)
+        async with AsyncSession(self.engine) as session:
+            page = await select_page(session, q, per_page=page_size, page=bookmark)
+        return ([Base_db.MessageRecord(*r) for r in page],
+                page.paging.bookmark_next if page.paging.has_next else None,
+                page.paging.bookmark_previous if page.paging.has_previous else None,)
+
+    async def get_messages_not_fully_text_indexed(self, bookmark: Optional[str]=None, page_size: int=1024,
+                                                  start_time: Optional[int]=None,
+                                                  end_time: Optional[int]=None):
+        j = sqlalchemy.join(self.messages_table, self.ts_table,
+                            self.messages_table.c.uuid == self.ts_table.c.uuid)
+        q = self.messages_table.select().select_from(j).where(self.ts_table.c.text_fully_indexed == False)
+        if start_time is not None:
+            q = q.where(self.messages_table.c.timestamp >= start_time)
+        if end_time is not None:
+            q = q.where(self.messages_table.c.timestamp < end_time)
+        q = q.order_by(self.messages_table.c.timestamp, self.messages_table.c.id)
+        async with AsyncSession(self.engine) as session:
+            page = await select_page(session, q, per_page=page_size, page=bookmark)
+        return ([Base_db.MessageRecord(*r) for r in page],
+                page.paging.bookmark_next if page.paging.has_next else None,
+                page.paging.bookmark_previous if page.paging.has_previous else None,)
 
 
 class AWS_db(SQL_db):

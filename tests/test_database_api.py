@@ -1,7 +1,9 @@
 import argparse
 from contextlib import contextmanager
 from hop.io import Metadata
+import operator
 import os
+import psycopg
 import pytest
 import sqlalchemy
 from unittest import mock
@@ -89,7 +91,8 @@ async def get_mock_store():
 
 def generate_message(payload: bytes, topic: str, timestamp: int, public: bool=True, headers=[]):
 	metadata = Metadata(topic=topic, partition=0, offset=0, timestamp=timestamp, key="", headers=headers, _raw=None)
-	annotations = decision_api.get_annotations(payload, metadata.headers, public=public)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(payload, metadata.headers, public=public)
 	annotations['size'] = len(payload)
 	annotations['key'] = annotations["con_text_uuid"]
 	annotations['bucket'] = "bucket"
@@ -144,7 +147,11 @@ async def test_SQL_db_create(tmpdir):
 		"is_client_uuid": "boolean",
 		"public": "boolean",
 		"direct_upload": "boolean",
-		"message_crc32": "bigint"
+		"message_crc32": "bigint",
+		"title": "text",
+		"sender": "text",
+		"media_type": "text",
+		"file_name": "text",
 	}
 
 	with temp_postgres(tmpdir) as db_conf:
@@ -178,11 +185,14 @@ async def test_SQL_db_insert_readonly(tmpdir):
 		assert len(result) == 0, "No rows should be found"
 
 @pytest.mark.asyncio
-async def test_SQL_db_insert(tmpdir):
+@pytest.mark.parametrize("index_text", (False, True))
+async def test_SQL_db_insert(tmpdir, index_text):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
+		text_to_index = decider.get_indexable_text(message, metadata.headers, annotations)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -191,12 +201,12 @@ async def test_SQL_db_insert(tmpdir):
 		db = database_api.SQL_db(db_conf)
 		await db.connect()
 		await db.make_schema()
-		await db.insert(metadata, annotations)
+		await db.insert(metadata, annotations, text_to_index if index_text else "")
 		async with db.engine.connect() as conn:
 			result = (await conn.execute(sqlalchemy.text("SELECT * FROM messages"))).all()
 		assert len(result) == 1, "One row should be found"
-		assert len(result[0]) == 12
-		# with column is the id; we don't care about its value
+		assert len(result[0]) == 16
+		# first column is the id; we don't care about its value
 		print(result[0])
 		assert result[0][1] == metadata.topic
 		assert result[0][2] == metadata.timestamp
@@ -209,13 +219,80 @@ async def test_SQL_db_insert(tmpdir):
 		assert result[0][9] == annotations['public']
 		assert result[0][10] == annotations['direct_upload']
 		assert result[0][11] == annotations['con_message_crc32']
+		assert result[0][12] == annotations['title']
+		assert result[0][13] == annotations['sender']
+		assert result[0][14] == annotations['media_type']
+		assert result[0][15] == annotations['file_name']
+
+		tsr = await db.search_message_text("datadatadata")
+		if index_text:
+			assert len(tsr[0]) == 1
+			assert tsr[0][0].uuid == u
+		else:
+			assert len(tsr[0]) == 0, "Text search should not find an un-indexed message"
+
+@pytest.mark.asyncio
+async def test_SQL_db_set_indexed_text(tmpdir):
+	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
+	message = b"datadatadata"
+	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
+		text_to_index = decider.get_indexable_text(message, metadata.headers, annotations)
+
+	st = await get_mock_store()
+	# we need to do this to get the last of the required annotations
+	await st.store(message, metadata, annotations)
+	with temp_postgres(tmpdir) as db_conf:
+		db = database_api.SQL_db(db_conf)
+		await db.connect()
+		await db.make_schema()
+		await db.insert(metadata, annotations)  # omit text_to_index
+		async with db.engine.connect() as conn:
+			result = (await conn.execute(sqlalchemy.text("SELECT * FROM messages"))).all()
+		assert len(result) == 1, "One row should be found"
+		assert len(result[0]) == 16
+		# first column is the id; we don't care about its value
+		print(result[0])
+		assert result[0][1] == metadata.topic
+		assert result[0][2] == metadata.timestamp
+		assert result[0][3] == u
+		assert result[0][4] == annotations['size']
+		assert result[0][5] == annotations['key']
+		assert result[0][6] == annotations['bucket']
+		assert result[0][7] == annotations['crc32']
+		assert result[0][8] == annotations['con_is_client_uuid']
+		assert result[0][9] == annotations['public']
+		assert result[0][10] == annotations['direct_upload']
+		assert result[0][11] == annotations['con_message_crc32']
+		assert result[0][12] == annotations['title']
+		assert result[0][13] == annotations['sender']
+		assert result[0][14] == annotations['media_type']
+		assert result[0][15] == annotations['file_name']
+		
+		tsr = await db.search_message_text("datadatadata")
+		assert len(tsr[0]) == 0, "Text search should not find an un-indexed message"
+		
+		await db.set_indexed_text(u, text_to_index, True, True)
+		tsr = await db.search_message_text("datadatadata")
+		assert len(tsr[0]) == 1
+		assert tsr[0][0].uuid == u
+		
+		# update the indexed again; normally this would not be an unrelated replacement
+		await db.set_indexed_text(u, "something different", True, True)
+		tsr = await db.search_message_text("datadatadata")
+		assert len(tsr[0]) == 0
+		tsr = await db.search_message_text("different")
+		assert len(tsr[0]) == 1
+		assert tsr[0][0].uuid == u
 
 @pytest.mark.asyncio
 async def test_SQL_db_fetch(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -246,7 +323,8 @@ async def test_SQL_db_uuid_in_db(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -264,7 +342,8 @@ async def test_SQL_db_exists_in_db(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -282,11 +361,13 @@ async def test_SQL_db_uuid_duplicates(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	m1 = b"datadatadata"
 	meta1 = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	a1 = decision_api.get_annotations(m1, meta1.headers)
 	
 	m2 = b"otherdata"
 	meta2 = Metadata(topic="t2", partition=0, offset=4, timestamp=19, key="", headers=[("_id",u.bytes)], _raw=None)
-	a2 = decision_api.get_annotations(m2, meta2.headers)
+	
+	with decision_api.Decider({}) as decider:
+		a1 = decider.get_annotations(m1, meta1.headers)
+		a2 = decider.get_annotations(m2, meta2.headers)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -304,22 +385,25 @@ async def test_SQL_db_uuid_duplicates(tmpdir):
 		result = await db.get_client_uuid_duplicates(limit=10)
 		assert len(result) == 0, "No duplicate should be found"
 		
-		await db.insert(meta2, a2)
+		with pytest.raises(sqlalchemy.exc.DBAPIError) as err:
+			await db.insert(meta2, a2)
+		assert isinstance(err.value.orig, psycopg.errors.UniqueViolation)
 		result = await db.get_client_uuid_duplicates(limit=10)
-		assert len(result) == 1, "A duplicate should be found"
-		assert result[0][1] == u, "The duplicate should involve the correct UUID"
+		assert len(result) == 0, "No duplicate should be found"
 
 @pytest.mark.asyncio
 async def test_SQL_db_content_duplicates(tmpdir):
 	u1 = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	m1 = b"datadatadata"
 	meta1 = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u1.bytes)], _raw=None)
-	a1 = decision_api.get_annotations(m1, meta1.headers)
 	
 	u2 = uuid.UUID("76543210-ffff-eeee-dddd-9876543210ba")
 	m2 = b"datadatadata"
 	meta2 = Metadata(topic="t1", partition=0, offset=4, timestamp=356, key="", headers=[("_id",u2.bytes)], _raw=None)
-	a2 = decision_api.get_annotations(m2, meta2.headers)
+
+	with decision_api.Decider({}) as decider:
+		a1 = decider.get_annotations(m1, meta1.headers)
+		a2 = decider.get_annotations(m2, meta2.headers)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -349,7 +433,8 @@ async def test_SQL_db_get_message_id(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -370,7 +455,8 @@ async def test_SQL_db_get_message_locations(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -723,6 +809,42 @@ async def test_SQL_db_get_message_records_time_range(db_class, tmpdir):
 		assert p is not None
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("db_class", (database_api.SQL_db,))
+async def test_SQL_db_count_message_records_rare(db_class, tmpdir):
+	with temp_postgres(tmpdir) as db_conf:
+		db = db_class(db_conf)
+		await db.connect()
+		await db.make_schema()
+
+		for i in range(0,500):
+			p1, m1, a1 = generate_message(b"alert", topic="t1", timestamp=i, public=True)
+			await db.insert(m1, a1)
+		
+		p2, m2, a2 = generate_message(b"another alert", topic="t2", timestamp=500, public=True)
+		await db.insert(m2, a2)
+		
+		for i in range(0,1999):
+			p1, m1, a1 = generate_message(b"alert", topic="t1", timestamp=501 + i, public=True)
+			await db.insert(m1, a1)
+		
+		p2, m2, a2 = generate_message(b"another alert", topic="t2", timestamp=1500, public=True)
+		await db.insert(m2, a2)
+		
+		for i in range(0,500):
+			p1, m1, a1 = generate_message(b"alert", topic="t1", timestamp=1501 + i, public=True)
+			await db.insert(m1, a1)
+		
+		results, n, p = await db.get_message_records(topics_public=["t2"], ascending=True)
+		assert len(results) == 2
+		assert results[0].timestamp == 500
+		assert results[1].timestamp == 1500
+		
+		results, n, p = await db.get_message_records(topics_public=["t2"], ascending=False)
+		assert len(results) == 2
+		assert results[0].timestamp == 1500
+		assert results[1].timestamp == 500
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_SQL_db_count_message_records_public(db_class, tmpdir):
 	with temp_postgres(tmpdir) as db_conf:
@@ -803,7 +925,6 @@ async def test_SQL_db_count_message_records_full(db_class, tmpdir):
 async def test_SQL_db_count_message_records_time_range(db_class, tmpdir):
 	with temp_postgres(tmpdir) as db_conf:
 		db = db_class(db_conf)
-		db = database_api.SQL_db(db_conf)
 		await db.connect()
 		await db.make_schema()
 		
@@ -848,6 +969,367 @@ async def test_SQL_db_count_message_records_time_range(db_class, tmpdir):
 		# all messages between 2 and 10
 		c = await db.count_message_records(topics_full=["t1", "t2"], start_time=2, end_time=10)
 		assert c == 8
+
+
+@pytest.mark.asyncio
+async def test_SQL_db_text_search(tmpdir):
+	with temp_postgres(tmpdir) as db_conf:
+		db = database_api.SQL_db(db_conf)
+		await db.connect()
+		await db.make_schema()
+		
+		messages = [
+			("The Time Traveller (for so it will be convenient to speak of him) was "
+			 "expounding a recondite matter to us.",
+			 [("author", b"Wells, H. G."), ("title", b"The Time Machine")]),
+			("The year 1886 was marked by a strange event, an unexplainable occurrence which is "
+			 "undoubtedly still fresh in everyone's memory.",
+			 [("author", b"Verne, J."), ("title", b"Twenty Thousand Leagues under the Sea")]),
+			("Looking back to all that has occurred to me since that day, I am scarcely able to "
+			 "believe in the reality of my adventures.",
+			 [("author", b"Verne, J."), ("title", b"Journey to the Center of the Earth")]),
+			("It can hardly be a coincidence that no language on earth has produced the expression "
+			 "\"As pretty as an airport.\"",
+			 [("author",b"Adams, D."), ("title", b"The Long Dark Tea-Time of the Soul")]),
+			("3 May Bistritz.—Left Munich at 8.35 p.m. on 1st May, arriving at Vienna early next "
+			 "morning; should have arrived at 6.46, but train was an hour late.",
+			 [("author", b"Stoker, B."), ("title", b"Dracula")]),
+			("As I sit down to write here admidst the shadows of vine-leaves under the blue sky of "
+			 "southern Italy it comes to me with a certain quality of astonishment that my "
+			 "participation in these amazing adventures of Mr Cavor was, after all, the outcome of "
+			 "the purest accident.",
+			 [("author",b"Wells, H. G."), ("title", b"The First Men in the Moon")]),
+			("alloyed wells amazing year blue traveller certain time convenient reality "
+			 "fresh occurrence late memory pretty matter purest everyone recondite event "
+			 "southern coincidence strange day unexplainable adventures", [])
+		]
+		uuids = []
+		
+		i = 0
+		with decision_api.Decider({}) as decider:
+			for raw in messages:
+				p, m, a = generate_message(raw[0].encode("utf-8"), topic="t1", timestamp=i,
+				                           public=True, headers=raw[1])
+				t = decider.get_indexable_text(p, m.headers, a)
+				print(f"Message {i} text to index: {t}")
+				uuids.append(a["con_text_uuid"])
+				await db.insert(m, a, t)
+				i += 1
+		
+		results = await db.search_message_text("airport")
+		assert len(results[0]) == 1
+		assert str(results[0][0].uuid) == uuids[3]
+		assert await db.count_text_search_results("airport") == 1
+		
+		results = await db.search_message_text("seaport")
+		assert len(results[0]) == 0
+		assert await db.count_text_search_results("seaport") == 0
+		
+		results = await db.search_message_text("adventures")
+		assert len(results[0]) == 3
+		assert sorted([str(r.uuid) for r in results[0]]) == sorted([uuids[2], uuids[5], uuids[6]])
+		assert await db.count_text_search_results("adventures") == 3
+		
+		results = await db.search_message_text("earth")
+		assert len(results[0]) == 2
+		assert sorted([str(r.uuid) for r in results[0]]) == sorted([uuids[2], uuids[3]])
+		assert await db.count_text_search_results("earth") == 2
+		
+		results = await db.search_message_text("author Wells")
+		assert len(results[0]) == 2
+		assert sorted([str(r.uuid) for r in results[0]]) == sorted([uuids[0], uuids[5]])
+		assert await db.count_text_search_results("author Wells") == 2
+		
+		results = await db.search_message_text("adventures author Wells")
+		assert len(results[0]) == 1
+		assert str(results[0][0].uuid) == uuids[5]
+		assert await db.count_text_search_results("adventures author Wells") == 1
+		
+		results = await db.search_message_text("\"amazing adventures\"")
+		assert len(results[0]) == 1
+		assert str(results[0][0].uuid) == uuids[5]
+		assert await db.count_text_search_results("\"amazing adventures\"") == 1
+		
+		results = await db.search_message_text("Verne -reality")
+		print(results)
+		assert len(results[0]) == 1
+		assert str(results[0][0].uuid) == uuids[1]
+		assert await db.count_text_search_results("Verne -reality") == 1
+		
+		results = await db.search_message_text("italy OR vienna")
+		assert len(results[0]) == 2
+		assert sorted([str(r.uuid) for r in results[0]]) == sorted([uuids[4], uuids[5]])
+		assert await db.count_text_search_results("italy OR vienna") == 2
+		
+		def is_sorted(data, key = lambda i: i, cmp = operator.le):
+			if len(data) < 2:
+				return True
+			return all(cmp(key(data[i]), key(data[i+1])) for i in range(0, len(data) - 1))
+		
+		results = await db.search_message_text("adventures", ascending=True)
+		assert is_sorted(results[0], key = lambda r: r.timestamp)
+		results = await db.search_message_text("adventures", ascending=False)
+		assert is_sorted(results[0], key = lambda r: r.timestamp, cmp = operator.ge)
+
+
+@pytest.mark.asyncio
+async def test_SQL_db_text_search_access(tmpdir):
+	with temp_postgres(tmpdir) as db_conf:
+		db = database_api.SQL_db(db_conf)
+		await db.connect()
+		await db.make_schema()
+		
+		messages = [
+			"Crab nebula flare",
+			"NGC 1068 flare",
+			"Fermi bubble spectrum",
+			"SN1987A spectrum",
+			"Sagitarius A* observation",
+		]
+		
+		topics = {
+			"t1": True,
+			"t2": True,
+			"t3": False
+		}
+		
+		i = 0
+		with decision_api.Decider({}) as decider:
+			for raw in messages:
+				for topic in topics.keys():
+					p, m, a = generate_message(raw.encode("utf-8"), topic=topic, timestamp=i,
+											   public=topics[topic])
+					t = decider.get_indexable_text(p, m.headers, a)
+					await db.insert(m, a, t)
+				i += 1
+		
+		results = await db.search_message_text("flare")
+		assert len(results[0]) == 4
+		for result in results[0]:
+			assert topics[result.topic], "no topics specified should search only public topics by default"
+		assert await db.count_text_search_results("flare") == 4
+		
+		results = await db.search_message_text("flare", topics_public=["t2"])
+		assert len(results[0]) == 2
+		for result in results[0]:
+			assert result.topic == "t2"
+		assert await db.count_text_search_results("flare", topics_public=["t2"]) == 2
+		
+		results = await db.search_message_text("spectrum", topics_full=["t3"])
+		assert len(results[0]) == 2
+		for result in results[0]:
+			assert result.topic == "t3"
+		assert await db.count_text_search_results("spectrum", topics_full=["t3"]) == 2
+		
+		results = await db.search_message_text("spectrum", end_time=3)
+		assert len(results[0]) == 2
+		for result in results[0]:
+			assert result.timestamp < 3
+		assert await db.count_text_search_results("spectrum", end_time=3) == 2
+		
+		results = await db.search_message_text("flare", start_time=1)
+		assert len(results[0]) == 2
+		for result in results[0]:
+			assert result.timestamp >= 1
+		assert await db.count_text_search_results("flare", start_time=1) == 2
+
+
+@pytest.mark.asyncio
+async def test_SQL_db_text_search_pagination(tmpdir):
+	with temp_postgres(tmpdir) as db_conf:
+		db = database_api.SQL_db(db_conf)
+		await db.connect()
+		await db.make_schema()
+		
+		messages = [
+			"Crab nebula flare",
+			"NGC 1068 flare",
+			"Fermi bubble spectrum",
+			"SN1987A spectrum",
+			"Sagitarius A* observation",
+		]
+		
+		topics = ["t1", "t2"]
+		
+		i = 0
+		with decision_api.Decider({}) as decider:
+			for raw in messages:
+				for topic in topics:
+					p, m, a = generate_message(raw.encode("utf-8"), topic=topic, timestamp=i,
+											   public=True)
+					t = decider.get_indexable_text(p, m.headers, a)
+					await db.insert(m, a, t)
+				i += 1
+		
+		results = await db.search_message_text("flare OR spectrum", page_size=3)
+		assert len(results[0]) == 3
+		for result in results[0]:
+			assert result.timestamp == 0 or result.timestamp == 1
+		next = results[1]
+			
+		results = await db.search_message_text("flare OR spectrum", bookmark=next, page_size=3)
+		assert len(results[0]) == 3
+		for result in results[0]:
+			assert result.timestamp == 1 or result.timestamp == 2
+		next = results[1]
+			
+		results = await db.search_message_text("flare OR spectrum", bookmark=next, page_size=3)
+		assert len(results[0]) == 2
+		for result in results[0]:
+			assert result.timestamp == 3
+
+@pytest.mark.asyncio
+async def test_SQL_db_get_messages_not_text_indexed(tmpdir):
+	with temp_postgres(tmpdir) as db_conf:
+		db = database_api.SQL_db(db_conf)
+		await db.connect()
+		await db.make_schema()
+		st = await get_mock_store()
+		
+		# SQL_db.insert should never create message records without corresponding text search
+		# records, so we will need to emulate it to create some incomplete records to find
+		
+		async def insert_raw(metadata, annotations):
+			nonlocal db
+			async with db.engine.connect() as conn:
+				await conn.execute(
+					db.messages_table.insert().values(
+						topic = metadata.topic,
+						timestamp = metadata.timestamp,
+						uuid = annotations['con_text_uuid'],
+						size = annotations['size'],
+						key = annotations['key'],
+						bucket = annotations['bucket'],
+						crc32 = annotations['crc32'],
+						is_client_uuid = annotations['con_is_client_uuid'],
+						public = annotations['public'],
+						direct_upload = annotations['direct_upload'],
+						message_crc32 = annotations['con_message_crc32'],
+						title = annotations['title'],
+						sender = annotations['sender'],
+						media_type = annotations['media_type'],
+						file_name = annotations['file_name'],
+					)
+				)
+				await conn.commit()
+		
+		u1 = uuid.uuid4()
+		message = b"datadatadata"
+		m1 = Metadata(topic="t1", partition=0, offset=0, timestamp=356, key="", headers=[("_id",u1.bytes)], _raw=None)
+		with decision_api.Decider({}) as decider:
+			a1 = decider.get_annotations(message, m1.headers)
+		await st.store(message, m1, a1)
+		await db.insert(m1, a1)
+		
+		r, n, p = await db.get_messages_not_text_indexed()
+		assert len(r) == 0
+		
+		u2 = uuid.uuid4()
+		print(f"u2: {u2}")
+		m2 = Metadata(topic="t1", partition=0, offset=1, timestamp=359, key="", headers=[("_id",u2.bytes)], _raw=None)
+		with decision_api.Decider({}) as decider:
+			a2 = decider.get_annotations(message, m2.headers)
+		await st.store(message, m2, a2)
+		await insert_raw(m2, a2)
+		
+		r, n, p = await db.get_messages_not_text_indexed()
+		assert len(r) == 1
+		assert r[0].uuid == u2
+		
+		u3 = uuid.uuid4()
+		m3 = Metadata(topic="t1", partition=0, offset=2, timestamp=372, key="", headers=[("_id",u3.bytes)], _raw=None)
+		with decision_api.Decider({}) as decider:
+			a3 = decider.get_annotations(message, m3.headers)
+		await st.store(message, m3, a3)
+		await insert_raw(m3, a3)
+		
+		r, n, p = await db.get_messages_not_text_indexed()
+		assert len(r) == 2
+		assert r[0].uuid == u2
+		assert r[1].uuid == u3
+		
+		r, n, p = await db.get_messages_not_text_indexed(page_size=1)
+		assert len(r) == 1
+		assert r[0].uuid == u2
+		assert n is not None
+		assert p is None
+		r, n, p = await db.get_messages_not_text_indexed(bookmark=n, page_size=1)
+		assert len(r) == 1
+		assert r[0].uuid == u3
+		assert n is None
+		assert p is not None
+		
+		r, n, p = await db.get_messages_not_text_indexed(start_time=360)
+		assert len(r) == 1
+		assert r[0].uuid == u3
+		
+		r, n, p = await db.get_messages_not_text_indexed(end_time=360)
+		assert len(r) == 1
+		assert r[0].uuid == u2
+
+@pytest.mark.asyncio
+async def test_SQL_db_get_messages_not_fully_text_indexed(tmpdir):
+	with temp_postgres(tmpdir) as db_conf:
+		db = database_api.SQL_db(db_conf)
+		await db.connect()
+		await db.make_schema()
+		st = await get_mock_store()
+		
+		u1 = uuid.uuid4()
+		message = b"datadatadata"
+		m1 = Metadata(topic="t1", partition=0, offset=0, timestamp=356, key="", headers=[("_id",u1.bytes)], _raw=None)
+		with decision_api.Decider({}) as decider:
+			a1 = decider.get_annotations(message, m1.headers)
+			t1 = decider.get_indexable_text(message, m1.headers, a1)
+		await st.store(message, m1, a1)
+		await db.insert(m1, a1, t1)
+		
+		r, n, p = await db.get_messages_not_fully_text_indexed()
+		assert len(r) == 0
+		
+		u2 = uuid.uuid4()
+		message = b"datadatadata"
+		m2 = Metadata(topic="t1", partition=0, offset=0, timestamp=359, key="", headers=[("_id",u2.bytes)], _raw=None)
+		with decision_api.Decider({}) as decider:
+			a2 = decider.get_annotations(message, m2.headers)
+		await st.store(message, m2, a2)
+		await db.insert(m2, a2)
+		
+		r, n, p = await db.get_messages_not_fully_text_indexed()
+		assert len(r) == 1
+		assert r[0].uuid == u2
+		
+		u3 = uuid.uuid4()
+		message = b"datadatadata"
+		m3 = Metadata(topic="t1", partition=0, offset=0, timestamp=372, key="", headers=[("_id",u3.bytes)], _raw=None)
+		with decision_api.Decider({}) as decider:
+			a3 = decider.get_annotations(message, m3.headers)
+		await st.store(message, m3, a3)
+		await db.insert(m3, a3)
+		
+		r, n, p = await db.get_messages_not_fully_text_indexed()
+		assert len(r) == 2
+		assert r[0].uuid == u2
+		assert r[1].uuid == u3
+		
+		r, n, p = await db.get_messages_not_fully_text_indexed(page_size=1)
+		assert len(r) == 1
+		assert r[0].uuid == u2
+		assert n is not None
+		assert p is None
+		r, n, p = await db.get_messages_not_fully_text_indexed(bookmark=n, page_size=1)
+		assert len(r) == 1
+		assert r[0].uuid == u3
+		assert n is None
+		assert p is not None
+		
+		r, n, p = await db.get_messages_not_fully_text_indexed(start_time=360)
+		assert len(r) == 1
+		assert r[0].uuid == u3
+		
+		r, n, p = await db.get_messages_not_fully_text_indexed(end_time=360)
+		assert len(r) == 1
+		assert r[0].uuid == u2
 		
 
 # These tests test test code, which is a bit pointless, but keeps it from cluttering up the coverage
@@ -898,7 +1380,8 @@ async def test_Mock_db_get_message_id():
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -928,7 +1411,8 @@ async def test_Mock_db_fetch():
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations

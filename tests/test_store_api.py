@@ -75,7 +75,8 @@ async def test_S3_store_store_get(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	with temp_minio(tmpdir) as st_conf:
 		st = store_api.S3_store(st_conf)
@@ -101,7 +102,8 @@ async def test_S3_store_store_readonly(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	with temp_minio(tmpdir) as st_conf:
 		st = store_api.S3_store(st_conf)
@@ -119,7 +121,8 @@ async def test_S3_store_get_lazily(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadatadata"*64
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	with temp_minio(tmpdir) as st_conf:
 		st = store_api.S3_store(st_conf)
@@ -145,7 +148,8 @@ async def test_S3_store_get_object_summary(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadatadata"*64
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	with temp_minio(tmpdir) as st_conf:
 		st = store_api.S3_store(st_conf)
@@ -173,7 +177,8 @@ async def test_Mock_store_store_readonly(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	st = store_api.Mock_store({"store_primary_bucket": "a", "store_backup_bucket": "b",
 	                           "store_region_name": "r"})
@@ -192,7 +197,8 @@ async def test_Mock_store_deep_delete(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	annotations = decision_api.get_annotations(message, metadata.headers)
+	with decision_api.Decider({}) as decider:
+		annotations = decider.get_annotations(message, metadata.headers)
 
 	st = store_api.Mock_store({"store_primary_bucket": "a", "store_backup_bucket": "b",
 	                           "store_region_name": "r"})

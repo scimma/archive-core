@@ -1,5 +1,5 @@
 import argparse
-from hop.auth import Auth, write_auth_data
+from hop.auth import Auth, SASLMethod, write_auth_data
 from hop.io import Metadata
 import os
 import pytest
@@ -176,6 +176,65 @@ def test_hop_consumer_create_secret(tmpdir):
 		"hopauth_aws_secret_name": secret_name,
 		"hopauth_aws_secret_region": secret_region,
 		"hopauth_api_url": "http://127.0.0.1/hopauth/api",
+	}
+	with mock.patch("boto3.session.Session", mock.MagicMock(return_value=session)):
+		hc = consumer_api.Hop_consumer(config)
+		assert hc.kafka_auth == cred
+		assert hc.hopauth_auth == cred
+		session.client.assert_called_with(service_name="secretsmanager", region_name=secret_region)
+		client.get_secret_value.assert_called_with(SecretId=secret_name)
+
+def test_hop_consumer_create_secret_text_creds(tmpdir):
+	cred = Auth("foo", "bar", method=SASLMethod.PLAIN)
+	cred_data = {"SecretString": f'username="{cred.username}" password="{cred.password}"'}
+	secret_name = "archive_cred"
+	secret_region = "ac-pole-1"
+	
+	session = mock.MagicMock()
+	client = mock.MagicMock()
+	client.get_secret_value = mock.MagicMock(return_value=cred_data)
+	session.client = mock.MagicMock(return_value=client)
+	
+	config = {
+		"kafka_aws_secret_name": secret_name,
+		"kafka_aws_secret_region": secret_region,
+		"kafka_groupname": "*random*",
+		"kafka_hostname": "example.com",
+		"kafka_port": 9092,
+		"hopauth_aws_secret_name": secret_name,
+		"hopauth_aws_secret_region": secret_region,
+		"hopauth_api_url": "http://127.0.0.1/hopauth/api",
+	}
+	with mock.patch("boto3.session.Session", mock.MagicMock(return_value=session)):
+		hc = consumer_api.Hop_consumer(config)
+		assert hc.kafka_auth == cred
+		assert hc.hopauth_auth == cred
+		session.client.assert_called_with(service_name="secretsmanager", region_name=secret_region)
+		client.get_secret_value.assert_called_with(SecretId=secret_name)
+
+def test_hop_consumer_create_secret_text_multi_creds(tmpdir):
+	cred = Auth("baz", "quux", method=SASLMethod.PLAIN)
+	cred_data = {"SecretString": 'username="foo" password="bar" '
+	                             f'user_{cred.username}="{cred.password}" user_corge="grault"'}
+	secret_name = "archive_cred"
+	secret_region = "ac-pole-1"
+	
+	session = mock.MagicMock()
+	client = mock.MagicMock()
+	client.get_secret_value = mock.MagicMock(return_value=cred_data)
+	session.client = mock.MagicMock(return_value=client)
+	
+	config = {
+		"kafka_aws_secret_name": secret_name,
+		"kafka_aws_secret_region": secret_region,
+		"kafka_groupname": "*random*",
+		"kafka_hostname": "example.com",
+		"kafka_port": 9092,
+		"kafka_username": "baz",
+		"hopauth_aws_secret_name": secret_name,
+		"hopauth_aws_secret_region": secret_region,
+		"hopauth_api_url": "http://127.0.0.1/hopauth/api",
+		"hopauth_username": "baz",
 	}
 	with mock.patch("boto3.session.Session", mock.MagicMock(return_value=session)):
 		hc = consumer_api.Hop_consumer(config)
