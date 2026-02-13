@@ -242,7 +242,7 @@ class Hop_consumer(Base_consumer):
             username = next(iter(creds))
             return hop.auth.Auth(username, creds[username], method=hop.auth.SASLMethod.PLAIN)
         else:
-            raise RuntimeError(f"Ambiguous text-format creential from secret {secret_name}")
+            raise RuntimeError(f"Ambiguous text-format credential from secret {secret_name}")
 
     def refresh_url(self) -> bool:
         """
@@ -292,7 +292,7 @@ class Hop_consumer(Base_consumer):
         logging.info(f"Hop Url (re)configured: {self.url} excluding {self.vetoed_topics}")
         if changed:
             with open("topics.log","a") as f:
-                f.write(f"{datetime.datetime.utcnow().isoformat()} {topics}\n")
+                f.write(f"{datetime.datetime.now(datetime.UTC).isoformat()} {topics}\n")
         return changed
 
     def connect(self):

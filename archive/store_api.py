@@ -154,7 +154,7 @@ class S3_store(Base_store):
                                                           config=botocore.client.Config(s3={'addressing_style': 'virtual'})).__aenter__()
         
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-        conn = aiohttp.TCPConnector(ssl_context=ssl_ctx)
+        conn = aiohttp.TCPConnector(ssl=ssl_ctx)
         self.http_session = aiohttp.ClientSession(connector=conn)
 
     async def close(self):
