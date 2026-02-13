@@ -19,6 +19,7 @@ from . import utility_api
 
 def add_parser_options(parser):
     database_api.add_parser_options(parser)
+    decision_api.add_parser_options(parser)
     store_api.add_parser_options(parser)
     parser.add_argument("--read-only", help="Set whether only read operations are permitted",
                         type=bool, action=utility_api.EnvDefault, envvar="READ_ONLY",
@@ -32,6 +33,7 @@ class Archive_access():
         """
         self.db     = database_api.DbFactory(config)
         self.store  = store_api.StoreFactory(config)
+        self.decider = decision_api.Decider(config)
         self.read_only = config.get("read_only", False)
     
     async def connect(self):
@@ -40,10 +42,12 @@ class Archive_access():
         if self.read_only:
             await self.db.set_read_only()
             await self.store.set_read_only()
+        pass
 
     async def close(self):
         await self.db.close()
         await self.store.close()
+        pass
     
     async def get_metadata(self, uuid):
         "get metadata, if any associated with a message with the given ID"
@@ -83,13 +87,14 @@ class Archive_access():
         return await self.store.get_object_summary(key)
 
     async def store_message(self, payload, metadata, public: bool=True, direct_upload: bool=False):
-        annotations = decision_api.get_annotations(payload, metadata.headers,
+        annotations = self.decider.get_annotations(payload, metadata.headers,
                                                    public=public, direct_upload=direct_upload)
-        if await decision_api.is_deemed_duplicate(annotations, metadata, self.db, self.store):
+        if await self.decider.is_deemed_duplicate(annotations, metadata, self.db, self.store):
             logging.info(f"Duplicate not stored {annotations}")
             return (False,{},"Message with duplicate UUID not stored")
+        text_to_index = self.decider.get_indexable_text(payload, metadata.headers, annotations)
         await self.store.store(payload, metadata, annotations)
-        await self.db.insert(metadata, annotations)
+        await self.db.insert(metadata, annotations, text_to_index)
         return (True,
                 {"archive_uuid": annotations["con_text_uuid"],
                  "is_client_uuid": annotations["con_is_client_uuid"]},
@@ -149,3 +154,9 @@ class Archive_access():
         Return: An integer count of messages
         """
         return await self.db.count_message_records(*args, **kwargs)
+    
+    async def search_message_text(self, *args, **kwargs):
+    	return await self.db.search_message_text(*args, **kwargs)
+    
+    async def count_text_search_results(self, *args, **kwargs):
+    	return await self.db.count_text_search_results(*args, **kwargs)
