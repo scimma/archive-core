@@ -458,7 +458,7 @@ class SQL_db(Base_db):
         self.engine = create_async_engine(
             url=f"postgresql+psycopg://{self.user_name}:{self.password}@{self.host}:{self.port}/{self.db_name}",
             pool_size  = self.maxconn,
-            echo = True,
+            # echo = True,
         )
         self.db_meta = sqlalchemy.MetaData()
         Column = sqlalchemy.Column
