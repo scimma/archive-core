@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "archive-core"
 description = "Core implementation of the Hopskotch Archive"
-requires-python = ">=3.6"
+requires-python = ">=3.12"
 dependencies = [
     "aioboto3==15.1.0",
     "aiobotocore[boto3]==2.24.0",
