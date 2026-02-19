@@ -156,7 +156,7 @@ class Archive_access():
         return await self.db.count_message_records(*args, **kwargs)
     
     async def search_message_text(self, *args, **kwargs):
-    	return await self.db.search_message_text(*args, **kwargs)
+        return await self.db.search_message_text(*args, **kwargs)
     
     async def count_text_search_results(self, *args, **kwargs):
-    	return await self.db.count_text_search_results(*args, **kwargs)
+        return await self.db.count_text_search_results(*args, **kwargs)
