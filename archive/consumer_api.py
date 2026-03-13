@@ -27,11 +27,9 @@ import json
 import logging
 import os
 import random
-import re
 import requests
 import time
 from typing import Optional
-from urllib.parse import urlparse
 import uuid
 from hop.io import Stream, StartPosition, list_topics
 from hop import http_scram
@@ -82,23 +80,6 @@ def add_parser_options(parser):
                         help="Number of seconds to wait before rescanning topics to archive",
                         type=int, action=EnvDefault, envvar="KAFKA_TOPIC_REFRESH_INTERVAL",
                         default=600)
-    parser.add_argument("--hopauth-api-url", help="Base URL for the hopauth API",
-                        type=str, action=EnvDefault, envvar="HOPAUTH_API_URL", required=False)
-    parser.add_argument("--hopauth-username",
-                        help="Username of the credential to use for the hopauth API", type=str,
-                        action=EnvDefault, envvar="HOPAUTH_USERNAME", required=False)
-    parser.add_argument("--hopauth-local-auth",
-                        help="Path to a local hop auth TOML file from which to read credentials "
-                        "for the hopauth API", type=str, action=EnvDefault,
-                        envvar="HOPAUTH_LOCAL_AUTH", required=False)
-    parser.add_argument("--hopauth-aws-secret-name",
-                        help="Name of an AWS secret from which to read hopauth API credentials",
-                        type=str, action=EnvDefault, envvar="HOPAUTH_AWS_SECRET_NAME",
-                        required=False)
-    parser.add_argument("--hopauth-aws-secret-region",
-                        help="Name of the AWS region in which to look for the AWS secret from which"
-                        " to read hopauth API credentials", type=str, action=EnvDefault, 
-                        envvar="HOPAUTH_AWS_SECRET_REGION", default="us-west-2", required=False)
 
 
 class Base_consumer:
@@ -170,28 +151,13 @@ class Hop_consumer(Base_consumer):
                                                   config.get("kafka_username", None))
         elif "kafka_aws_secret_name" in config and config["kafka_aws_secret_name"] \
              and "kafka_aws_secret_region" in config and config["kafka_aws_secret_region"]:
-            self.kafka_auth = self.auth_from_secret(config["kafka_aws_secret_region"],
-                                                    config["kafka_aws_secret_name"],
-                                                    config.get("kafka_username", None))
+            self.kafka_auth = utility_api.auth_from_secret(config["kafka_aws_secret_region"],
+                                                           config["kafka_aws_secret_name"],
+                                                           config.get("kafka_username", None))
         else:
             raise RuntimeError("Kafka broker credentials not configured")
-            
-        if "hopauth_username" in config and config["hopauth_username"] \
-          and "HOPAUTH_PASSWORD" in os.environ:
-            self.hopauth_auth = hop.auth.Auth(config["hopauth_username"],
-                                              os.environ["HOPAUTH_PASSWORD"])
-        elif "hopauth_local_auth" in config and config["hopauth_local_auth"]:
-            auth = hop.auth.load_auth(config["hopauth_local_auth"])
-            self.hopauth_auth = hop.auth.select_matching_auth(auth,
-                                                              urlparse(self.auth_api_url).netloc,
-                                                              config.get("hopauth_username", None))
-        elif "hopauth_aws_secret_name" in config and config["hopauth_aws_secret_name"] \
-             and "hopauth_aws_secret_region" in config and config["hopauth_aws_secret_region"]:
-            self.hopauth_auth = self.auth_from_secret(config["hopauth_aws_secret_region"],
-                                                      config["hopauth_aws_secret_name"],
-                                                      config.get("hopauth_username", None))
-        else:
-            raise RuntimeError("Hopauth API credentials not configured")
+        
+        self.hopauth_auth = utility_api.get_hopskotch_credential(config)
 
         self.vetoed_topics    = config.get("kafka_vetoed_topics", [])
         self.refresh_interval = config.get("kafka_topic_refresh_interval", 600)
@@ -204,45 +170,6 @@ class Hop_consumer(Base_consumer):
 
         self.n_recieved = 0
         self.client = None
-    
-    def auth_from_secret(self, secret_region: str, secret_name: str, username: str=""):
-        session = boto3.session.Session()
-        client = session.client(
-            service_name='secretsmanager',
-            region_name=secret_region
-        )
-        resp = client.get_secret_value(
-            SecretId=secret_name
-        )['SecretString']
-        try:
-            data = json.loads(resp)
-            return hop.auth.Auth(data["username"], data["password"])
-        except json.JSONDecodeError:
-            pass
-        
-        # if the data is not JSON try parsing it as a text config file
-        chunks = resp.split(' ')
-        creds = {}
-        last_user=None
-        for chunk in chunks:
-            if match:=re.fullmatch('username="([^"]+)"', chunk):
-                last_user=match[1]
-            elif match:=re.fullmatch('password="([^"]+)"', chunk):
-                if last_user is not None:
-                    creds[last_user]=match[1]
-                last_user=None
-            elif match:=re.fullmatch('user_([^=]+)="([^"]+)"', chunk):
-                creds[match[1]]=match[2]
-                last_user=None
-            else:
-                raise RuntimeError("Text credential list parse error")
-        if username and username in creds:
-            return hop.auth.Auth(username, creds[username], method=hop.auth.SASLMethod.PLAIN)
-        elif len(creds) == 1:
-            username = next(iter(creds))
-            return hop.auth.Auth(username, creds[username], method=hop.auth.SASLMethod.PLAIN)
-        else:
-            raise RuntimeError(f"Ambiguous text-format credential from secret {secret_name}")
 
     def refresh_url(self) -> bool:
         """

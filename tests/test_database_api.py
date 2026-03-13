@@ -13,7 +13,7 @@ from archive import database_api
 from archive import decision_api
 from archive import store_api
 
-from conftest import temp_environ, temp_postgres
+from conftest import temp_environ, temp_postgres, MockHttpResponse
 
 pytest_plugins = ('pytest_asyncio',)
 
@@ -236,9 +236,19 @@ async def test_SQL_db_set_indexed_text(tmpdir):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
-		text_to_index = decider.get_indexable_text(message, metadata.headers, annotations)
+	dConfig = {
+		"hopauth_api_url": "http://example.com/api",
+		"hopauth_username": "user"
+	}
+	topic_metadata = [
+		{"name": "t1", "archivable": True, "index_archived_text": True}
+	]
+	with temp_environ(KAFKA_PASSWORD="test-pass", HOPAUTH_PASSWORD="test-api-pass"), \
+	     mock.patch('requests.get', mock.Mock(return_value=MockHttpResponse(200, topic_metadata))):
+		with decision_api.Decider(dConfig) as decider:
+			annotations = decider.get_annotations(message, metadata.headers)
+			text_to_index = decider.get_indexable_text(message, metadata.headers, annotations)
+			print(f"text_to_index: {text_to_index}")
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -273,7 +283,7 @@ async def test_SQL_db_set_indexed_text(tmpdir):
 		tsr = await db.search_message_text("datadatadata")
 		assert len(tsr[0]) == 0, "Text search should not find an un-indexed message"
 		
-		await db.set_indexed_text(u, text_to_index, True, True)
+		await db.set_indexed_text(u, text_to_index, True, False)
 		tsr = await db.search_message_text("datadatadata")
 		assert len(tsr[0]) == 1
 		assert tsr[0][0].uuid == u
@@ -1186,40 +1196,13 @@ async def test_SQL_db_get_messages_not_text_indexed(tmpdir):
 		await db.make_schema()
 		st = await get_mock_store()
 		
-		# SQL_db.insert should never create message records without corresponding text search
-		# records, so we will need to emulate it to create some incomplete records to find
-		
-		async def insert_raw(metadata, annotations):
-			nonlocal db
-			async with db.engine.connect() as conn:
-				await conn.execute(
-					db.messages_table.insert().values(
-						topic = metadata.topic,
-						timestamp = metadata.timestamp,
-						uuid = annotations['con_text_uuid'],
-						size = annotations['size'],
-						key = annotations['key'],
-						bucket = annotations['bucket'],
-						crc32 = annotations['crc32'],
-						is_client_uuid = annotations['con_is_client_uuid'],
-						public = annotations['public'],
-						direct_upload = annotations['direct_upload'],
-						message_crc32 = annotations['con_message_crc32'],
-						title = annotations['title'],
-						sender = annotations['sender'],
-						media_type = annotations['media_type'],
-						file_name = annotations['file_name'],
-					)
-				)
-				await conn.commit()
-		
 		u1 = uuid.uuid4()
 		message = b"datadatadata"
 		m1 = Metadata(topic="t1", partition=0, offset=0, timestamp=356, key="", headers=[("_id",u1.bytes)], _raw=None)
 		with decision_api.Decider({}) as decider:
 			a1 = decider.get_annotations(message, m1.headers)
 		await st.store(message, m1, a1)
-		await db.insert(m1, a1)
+		await db.insert(m1, a1, "")
 		
 		r, n, p = await db.get_messages_not_text_indexed()
 		assert len(r) == 0
@@ -1230,7 +1213,7 @@ async def test_SQL_db_get_messages_not_text_indexed(tmpdir):
 		with decision_api.Decider({}) as decider:
 			a2 = decider.get_annotations(message, m2.headers)
 		await st.store(message, m2, a2)
-		await insert_raw(m2, a2)
+		await db.insert(m2, a2, None)
 		
 		r, n, p = await db.get_messages_not_text_indexed()
 		assert len(r) == 1
@@ -1241,7 +1224,7 @@ async def test_SQL_db_get_messages_not_text_indexed(tmpdir):
 		with decision_api.Decider({}) as decider:
 			a3 = decider.get_annotations(message, m3.headers)
 		await st.store(message, m3, a3)
-		await insert_raw(m3, a3)
+		await db.insert(m3, a3, None)
 		
 		r, n, p = await db.get_messages_not_text_indexed()
 		assert len(r) == 2
@@ -1275,37 +1258,43 @@ async def test_SQL_db_get_messages_not_fully_text_indexed(tmpdir):
 		await db.make_schema()
 		st = await get_mock_store()
 		
-		u1 = uuid.uuid4()
-		message = b"datadatadata"
-		m1 = Metadata(topic="t1", partition=0, offset=0, timestamp=356, key="", headers=[("_id",u1.bytes)], _raw=None)
-		with decision_api.Decider({}) as decider:
-			a1 = decider.get_annotations(message, m1.headers)
-			t1 = decider.get_indexable_text(message, m1.headers, a1)
+		dConfig = {
+			"hopauth_api_url": "http://example.com/api",
+			"hopauth_username": "user"
+		}
+		topic_metadata = [
+			{"name": "t1", "archivable": True, "index_archived_text": True}
+		]
+		with temp_environ(HOPAUTH_PASSWORD="test-api-pass"), \
+			 mock.patch('requests.get', mock.Mock(return_value=MockHttpResponse(200, topic_metadata))):
+			message = b"datadatadata"
+			u1 = uuid.uuid4()
+			m1 = Metadata(topic="t1", partition=0, offset=0, timestamp=356, key="", headers=[("_id",u1.bytes)], _raw=None)
+			u2 = uuid.uuid4()
+			m2 = Metadata(topic="t1", partition=0, offset=0, timestamp=359, key="", headers=[("_id",u2.bytes)], _raw=None)
+			u3 = uuid.uuid4()
+			m3 = Metadata(topic="t1", partition=0, offset=0, timestamp=372, key="", headers=[("_id",u3.bytes)], _raw=None)
+			with decision_api.Decider({}) as decider:
+				a1 = decider.get_annotations(message, m1.headers)
+				t1 = decider.get_indexable_text(message, m1.headers, a1)
+				a2 = decider.get_annotations(message, m2.headers)
+				a3 = decider.get_annotations(message, m3.headers)
 		await st.store(message, m1, a1)
 		await db.insert(m1, a1, t1)
 		
 		r, n, p = await db.get_messages_not_fully_text_indexed()
 		assert len(r) == 0
-		
-		u2 = uuid.uuid4()
-		message = b"datadatadata"
-		m2 = Metadata(topic="t1", partition=0, offset=0, timestamp=359, key="", headers=[("_id",u2.bytes)], _raw=None)
-		with decision_api.Decider({}) as decider:
-			a2 = decider.get_annotations(message, m2.headers)
+			
 		await st.store(message, m2, a2)
-		await db.insert(m2, a2)
+		await db.insert(m2, a2, "")
 		
 		r, n, p = await db.get_messages_not_fully_text_indexed()
 		assert len(r) == 1
 		assert r[0].uuid == u2
 		
-		u3 = uuid.uuid4()
-		message = b"datadatadata"
-		m3 = Metadata(topic="t1", partition=0, offset=0, timestamp=372, key="", headers=[("_id",u3.bytes)], _raw=None)
-		with decision_api.Decider({}) as decider:
-			a3 = decider.get_annotations(message, m3.headers)
+		
 		await st.store(message, m3, a3)
-		await db.insert(m3, a3)
+		await db.insert(m3, a3, "")
 		
 		r, n, p = await db.get_messages_not_fully_text_indexed()
 		assert len(r) == 2

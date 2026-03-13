@@ -6,9 +6,9 @@ import pytest
 import time
 from unittest import mock
 
-from archive import consumer_api
+from archive import consumer_api, utility_api
 
-from conftest import temp_environ, temp_wd
+from conftest import temp_environ, temp_wd, MockHttpResponse
 
 pytest_plugins = ('pytest_asyncio',)
 
@@ -31,6 +31,7 @@ def test_ConsumerFactory():
 
 def test_add_parser_options(tmpdir):
 	parser = argparse.ArgumentParser()
+	utility_api.add_parser_options(parser)
 	consumer_api.add_parser_options(parser)
 	config = parser.parse_args(["--consumer-type", "hop",
                                 "--kafka-hostname", "example.com",
@@ -74,6 +75,7 @@ def test_add_parser_options(tmpdir):
 	                  HOPAUTH_LOCAL_AUTH="/etc/auth2", HOPAUTH_AWS_SECRET_NAME="shh",
 	                  HOPAUTH_AWS_SECRET_REGION="us-east-6"):
 		parser = argparse.ArgumentParser()
+		utility_api.add_parser_options(parser)
 		consumer_api.add_parser_options(parser)
 		config = parser.parse_args([])
 		assert config.consumer_type == "mock", "Consumer type should be set by the correct environment variable"
@@ -256,17 +258,6 @@ def test_hop_consumer_create_random_group():
 		hc = consumer_api.Hop_consumer(config)
 		assert hc.group_id.startswith(config["kafka_username"])
 		assert "*random*" not in hc.group_id
-
-class MockHttpResponse:
-	def __init__(self, status, json):
-		self.status_code = status
-		self.json_data = json
-	
-	def ok(self):
-		return self.status_code>=200 and self.status_code<=299
-	
-	def json(self):
-		return self.json_data
 
 def test_hop_consumer_refresh_url(tmpdir):
 	config = get_consumer_test_config()
