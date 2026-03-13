@@ -92,7 +92,10 @@ class Archive_access():
         if await self.decider.is_deemed_duplicate(annotations, metadata, self.db, self.store):
             logging.info(f"Duplicate not stored {annotations}")
             return (False,{},"Message with duplicate UUID not stored")
-        text_to_index = self.decider.get_indexable_text(payload, metadata.headers, annotations)
+        if self.decider.should_index_topic(metadata.topic, metadata.timestamp/1000.):
+            text_to_index = self.decider.get_indexable_text(payload, metadata.headers, annotations)
+        else:
+            text_to_index = None
         await self.store.store(payload, metadata, annotations)
         await self.db.insert(metadata, annotations, text_to_index)
         return (True,

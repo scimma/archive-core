@@ -18,6 +18,18 @@ except ImportError:
 if os.environ.get('POSTGRES_REMOTE_DB',''):
 	import psycopg
 
+class MockHttpResponse:
+	def __init__(self, status, json):
+		self.status_code = status
+		self.json_data = json
+	
+	@property
+	def ok(self):
+		return self.status_code>=200 and self.status_code<=299
+	
+	def json(self):
+		return self.json_data
+
 @contextmanager
 def temp_environ(**vars):
     """
