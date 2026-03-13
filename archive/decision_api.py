@@ -22,11 +22,14 @@ This moodule supports
 
 import bson
 import logging
+import requests
+import time
 import uuid
 import zlib
 
 import magic
 import hop.models
+from hop import http_scram
 
 from . import utility_api
 
@@ -56,6 +59,21 @@ class Decider:
 		self.magic = magic.Magic(flags=magic.MAGIC_MIME_TYPE)
 		self.text_index_message_size_limit = config.get("text_index_message_size_limit", 1<<22)
 		self.text_index_size_limit = config.get("text_index_size_limit", 1<<14)
+		try:
+			self.hopauth_auth = utility_api.get_hopskotch_credential(config)
+			try:
+				self.auth_api_url = config["hopauth_api_url"]
+			except:
+				raise RuntimeError("Hopauth API URL not configured")
+		except RuntimeError as err:
+			if len(err.args) > 0 and (err.args[0] == "Hopauth API credentials not configured"
+			  or err.args[0] == "Hopauth API URL not configured"):
+				logging.warning(f"{err.args[0]}: Text indexing will be disabled")
+			else:
+				raise
+		self.topic_metadata = {}
+		self.topic_metadata_check_period = 300
+		self.topic_metadata_timestamp = time.time() - self.topic_metadata_check_period
 
 
 	def close(self):
@@ -100,6 +118,8 @@ class Decider:
 	def get_string_header(self, headers, target):
 		"""Get the value of a specific header as a string, if it exists and can be decoded
 		"""
+		if headers is None:
+			return ""
 		for header in headers:
 			if header[0] == target:
 				try:
@@ -128,13 +148,14 @@ class Decider:
 		# first, if the message has a hop _format header, use that
 		# note that we do not break out of the loop after finding a candidate value, 
 		# so that the last value wins; we favor the last because hop-client appends to the headers
-		for header in headers:
-			if header[0] == "_format":
-				logging.debug(f" Found hop format header: {header[1]}")
-				candidate = self.hop_format_to_media_type(header[1])
-				if candidate is not None:
-					format = candidate
-					logging.debug(f" tentative format is {format}")
+		if headers is not None:
+			for header in headers:
+				if header[0] == "_format":
+					logging.debug(f" Found hop format header: {header[1]}")
+					candidate = self.hop_format_to_media_type(header[1])
+					if candidate is not None:
+						format = candidate
+						logging.debug(f" tentative format is {format}")
 			
 		# appliction/octet-stream is not very specific, so we would like to do better if we can
 		if format is not None and format != "application/octet-stream":
@@ -195,22 +216,61 @@ class Decider:
 		return duplicate
 
 
+	def _fetch_topic_metadata(self):
+		if not hasattr(self, "hopauth_auth") or not hasattr(self, "auth_api_url"):
+			# update the timestamp as if we fetched data, to avoid constantly retrying
+			self.topic_metadata_timestamp = time.time()
+			return
+		http_auth = http_scram.SCRAMAuth(self.hopauth_auth, shortcut=True)
+		resp = requests.get(f"{self.auth_api_url}/v1/topics", auth=http_auth)
+		if not resp.ok:
+			raise RuntimeError(f"Failed to contact hopauth API: {resp.status_code}")
+		self.topic_metadata = {t["name"]:t for t in resp.json()}
+		self.topic_metadata_timestamp = time.time()
+
+
+	def should_index_topic(self, topic, msg_time):
+		"""
+		Determine whether a message on a given topic should be text indexed
+		
+		Args:
+		    topic: The name of the topic on which the mesage was sent
+		    msg_time: The timestamp of the message, in seconds (not milliseconds as used by Kafka)
+		"""
+		# compute effective topic name, accounting for large-message offload pseudo-topics
+		offload_suffix = "+oversized"
+		if topic.endswith(offload_suffix):
+			topic = topic[:-len(offload_suffix)]
+		
+		if time.time() > self.topic_metadata_timestamp + self.topic_metadata_check_period:
+			self._fetch_topic_metadata()
+		elif topic not in self.topic_metadata and msg_time > self.topic_metadata_timestamp:
+			# A recent message might arrive on a topic which is unknown because it was created since
+			# the last metadata check, in which case we should update metadata.
+			# It can also be the case that a message is old and on a topic which has since been
+			# deleted, in which case we should not check, as we do not want to check on each old
+			# message.
+			self._fetch_topic_metadata()
+		return topic in self.topic_metadata and self.topic_metadata[topic]["index_archived_text"]
+
+
 	def get_indexable_text(self, message, headers, annotations):
 		chunks = []
 		
 		# try to collect text from headers
 		# ignore reserved headers, whose names start with underscores, 
 		# except the _sender header, which is text and of interest for searching
-		for header in headers:
-			if not header[0].startswith('_') or header[0]=="_sender":
-				try:
-					s = header[1].decode("utf-8")
-				except Exception as ex:
-					# headers may not be text, so treat decoding failures as unimportant
-					pass
-				else:
-					chunks.append(header[0] if not header[0].startswith('_') else header[0][1:])
-					chunks.append(s)
+		if headers is not None:
+			for header in headers:
+				if not header[0].startswith('_') or header[0]=="_sender":
+					try:
+						s = header[1].decode("utf-8")
+					except Exception as ex:
+						# headers may not be text, so treat decoding failures as unimportant
+						pass
+					else:
+						chunks.append(header[0] if not header[0].startswith('_') else header[0][1:])
+						chunks.append(s)
 		
 		# to prevent high memory use from unpacking various formats, only index message contents
 		# if the payload is small enough
@@ -225,6 +285,17 @@ class Decider:
 			logging.warning(f"Extracted {len(text)} bytes of text from a message, "
 			                f"truncating to {self.text_index_size_limit} bytes")
 			text = text[0:self.text_index_size_limit]
+		
+		# Make sure result string is clean of control characters
+		# For now, just deal with ASCII cases
+		text_dirty = False
+		for char in text:
+			c = ord(char)
+			if c < 32 or c == 127:
+				text_dirty = True
+				break
+		if text_dirty:
+			text = ''.join(' ' if ord(c)<32 or ord(c)==127 else c for c in text)
 		return text
 
 

@@ -2,14 +2,65 @@ from hop.io import Metadata
 import hop.io
 import hop.models
 from io import BytesIO
+import logging
 import pytest
+from unittest.mock import patch, MagicMock
 import uuid
 
 from archive import database_api
 from archive import decision_api
 from archive import store_api
 
+from conftest import temp_environ, MockHttpResponse
+
 pytest_plugins = ('pytest_asyncio',)
+
+
+decider_test_config = {
+    "hopauth_username": "Harpo",
+    "hopauth_api_url": "https://example.com/hopauth",
+    "text_index_message_size_limit": 1<<23,
+    "text_index_size_limit": 1<<16,
+}
+
+def test_decision_init():
+    with temp_environ(HOPAUTH_PASSWORD="Swordfish"):
+        dec = decision_api.Decider(decider_test_config)
+        assert dec.hopauth_auth.username == decider_test_config["hopauth_username"]
+        assert dec.hopauth_auth.password == "Swordfish"
+        assert dec.auth_api_url == decider_test_config["hopauth_api_url"]
+        assert dec.text_index_message_size_limit == decider_test_config["text_index_message_size_limit"]
+        assert dec.text_index_size_limit == decider_test_config["text_index_size_limit"]
+
+def test_decision_init_no_cred(caplog):
+    config_no_api_username = dict(decider_test_config)
+    del config_no_api_username["hopauth_username"]
+    dec_no_cred = decision_api.Decider(config_no_api_username)
+    assert len(caplog.record_tuples) == 1
+    assert caplog.record_tuples[0][1] == logging.WARNING
+    assert "Hopauth API credentials not configured" in caplog.record_tuples[0][2]
+    assert "Text indexing will be disabled" in caplog.record_tuples[0][2]
+
+def test_decision_init_no_api_url(caplog):
+    with temp_environ(HOPAUTH_PASSWORD="Swordfish"):
+        config_no_api_url = dict(decider_test_config)
+        del config_no_api_url["hopauth_api_url"]
+        dec_no_url = decision_api.Decider(config_no_api_url)
+        assert len(caplog.record_tuples) == 1
+        assert caplog.record_tuples[0][1] == logging.WARNING
+        assert "Hopauth API URL not configured" in caplog.record_tuples[0][2]
+        assert "Text indexing will be disabled" in caplog.record_tuples[0][2]
+
+def test_decision_init_bad_credfile(tmpdir):
+    with temp_environ(XDG_CONFIG_HOME=str(tmpdir)), \
+            pytest.raises(RuntimeError):
+        credpath = str(tmpdir)+"/credfile"
+        with open(credpath, 'w') as f:
+            f.write("blah")
+        config_no_api_username = dict(decider_test_config)
+        del config_no_api_username["hopauth_username"]
+        config_no_api_username["hopauth_local_auth"] = credpath
+        dec_no_cred = decision_api.Decider(config_no_api_username)
 
 @pytest.mark.asyncio
 async def test_is_content_identical():
@@ -81,6 +132,8 @@ def test_get_text_uuid():
 
 def test_get_string_header():
     with decision_api.Decider({}) as d:
+        assert d.get_string_header(None, "foo") == ""
+        
         assert d.get_string_header([("foo", b"bar")], "foo") == "bar"
         
         assert d.get_string_header([("foo", b"bar"), ("foo", b"baz")], "foo") == "bar"
@@ -287,6 +340,69 @@ async def test_is_deemed_duplicate():
         assert not a4["con_is_client_uuid"]
         await store(m4[0], m4[1], a4)
 
+def test__fetch_topic_metadata():
+    topic_metadata = [
+        {"name": "t1", "archivable": True, "index_archived_text": True},
+        {"name": "t2", "archivable": True, "index_archived_text": False},
+    ]
+    with temp_environ(HOPAUTH_PASSWORD="Swordfish"):
+        with patch("archive.decision_api.time.time", MagicMock(return_value=0.0)):
+            dec = decision_api.Decider(decider_test_config)
+    
+    with patch("archive.decision_api.time.time", MagicMock(return_value=1.0)), \
+            patch('requests.get', MagicMock(return_value=MockHttpResponse(200, topic_metadata))):
+        dec._fetch_topic_metadata()
+    assert dec.topic_metadata_timestamp == 1.0
+    for record in topic_metadata:
+        assert record["name"] in dec.topic_metadata
+        assert dec.topic_metadata[record["name"]] == record
+    
+    with patch("archive.decision_api.time.time", MagicMock(return_value=2.0)), \
+            patch('requests.get', MagicMock(return_value=MockHttpResponse(500, []))), \
+            pytest.raises(RuntimeError):
+        dec._fetch_topic_metadata()
+    # fetch time should not change after failed fetch
+    assert dec.topic_metadata_timestamp == 1.0
+
+def test_should_index_topic():
+    topic_metadata = [
+        {"name": "t1", "archivable": True, "index_archived_text": True},
+        {"name": "t2", "archivable": True, "index_archived_text": False},
+    ]
+    with temp_environ(HOPAUTH_PASSWORD="Swordfish"):
+        with patch("archive.decision_api.time.time", MagicMock(return_value=0.0)):
+            dec = decision_api.Decider(decider_test_config)
+    
+    with patch("archive.decision_api.time.time", MagicMock(return_value=10.0)), \
+            patch('requests.get', MagicMock(return_value=MockHttpResponse(200, topic_metadata))):
+        si = dec.should_index_topic("t1", 5)
+        assert si
+        assert dec.topic_metadata_timestamp == 10.0
+        
+        si = dec.should_index_topic("t1+oversized", 6)
+        assert si, "offloaded large messages should be treated according to the base topic"
+        
+        si = dec.should_index_topic("t2", 7)
+        assert not si
+        
+        si = dec.should_index_topic("t2+oversized", 8)
+        assert not si, "offloaded large messages should be treated according to the base topic"
+        
+        si = dec.should_index_topic("t3", -1000)
+        assert not si, "an old message on an unknown topic should not be indexed"
+    
+    topic_metadata.append({"name": "t3", "archivable": True, "index_archived_text": True})
+    with patch("archive.decision_api.time.time", MagicMock(return_value=20.0)), \
+            patch('requests.get', MagicMock(return_value=MockHttpResponse(200, topic_metadata))):
+        si = dec.should_index_topic("t3", 15)
+        assert si, "a new message on an unknown topic should trigger a new metadata lookup"
+    
+    with patch("archive.decision_api.time.time", MagicMock(return_value=30.0)), \
+            patch('requests.get', MagicMock(return_value=MockHttpResponse(200, topic_metadata))):
+        si = dec.should_index_topic("t4", 25)
+        assert not si, "a new message on an unknown topic should not be indexed " \
+                       "if it is still unknown after the new lookup"
+
 @pytest.mark.asyncio
 async def test_get_indexable_text_from_headers():
     u = uuid.uuid4()
@@ -395,7 +511,8 @@ async def test_get_indexable_text_message():
         for key, value in gcncircular.header.items():
             assert key in text
             assert value in text
-        assert gcncircular.body in text
+        for word in gcncircular.body.split():
+            assert word in text
         
         gcntextnotice = hop.models.GCNTextNotice.load(
             b'TITLE:            GCN/AMON NOTICE\n'

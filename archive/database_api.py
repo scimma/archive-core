@@ -517,7 +517,7 @@ class SQL_db(Base_db):
                     ddl = sqlalchemy.DDL(f.read().replace("%", "%%"))
                 await conn.execute(ddl)
 
-    async def insert(self, metadata, annotations, text_to_index=""):
+    async def insert(self, metadata, annotations, text_to_index=None):
         "insert one record into the DB"
         if self.read_only:
             raise RuntimeError("This database object is set to read-only; insert is forbidden")
@@ -542,13 +542,14 @@ class SQL_db(Base_db):
                     file_name = annotations['file_name'],
                 )
             )
-            await conn.execute(
-                self.ts_table.insert().values(
-                    uuid = annotations['con_text_uuid'],
-                    text_data = sqlalchemy.func.to_tsvector(text_to_index),
-                    text_fully_indexed = annotations.get("text_fully_indexed", False),
+            if text_to_index is not None:
+                await conn.execute(
+                    self.ts_table.insert().values(
+                        uuid = annotations['con_text_uuid'],
+                        text_data = sqlalchemy.func.to_tsvector(text_to_index),
+                        text_fully_indexed = annotations.get("text_fully_indexed", False),
+                    )
                 )
-            )
             await conn.commit()
         self.n_inserted +=1
         self.log()
