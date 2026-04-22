@@ -263,7 +263,6 @@ class Decider:
 		topic = self._effective_topic_name(topic)
 		metadata = self._metadata_for_topic(topic, msg_time)
 		if metadata is not None:
-			print(f"Metadata for {topic}: {metadata}")
 			return metadata.get("publicly_readable", False)
 		return False
 
