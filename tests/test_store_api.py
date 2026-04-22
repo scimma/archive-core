@@ -10,9 +10,16 @@ import uuid
 from archive import decision_api
 from archive import store_api
 
-from conftest import temp_environ, temp_minio
+from conftest import hopauth_mock, temp_environ, temp_minio
 
 pytest_plugins = ('pytest_asyncio',)
+
+decider_test_config = {
+    "hopauth_username": "Harpo",
+    "hopauth_api_url": "https://example.com/hopauth",
+    "text_index_message_size_limit": 1<<23,
+    "text_index_size_limit": 1<<16,
+}
 
 def test_StoreFactory():
 	with mock.patch("archive.store_api.Mock_store", mock.MagicMock()) as mst, \
@@ -71,12 +78,12 @@ async def test_S3_store_startup(tmpdir):
 		await st.close()
 
 @pytest.mark.asyncio
-async def test_S3_store_store_get(tmpdir):
+async def test_S3_store_store_get(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	with temp_minio(tmpdir) as st_conf:
 		st = store_api.S3_store(st_conf)
@@ -98,12 +105,12 @@ async def test_S3_store_store_get(tmpdir):
 		await st.close()
 
 @pytest.mark.asyncio
-async def test_S3_store_store_readonly(tmpdir):
+async def test_S3_store_store_readonly(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	with temp_minio(tmpdir) as st_conf:
 		st = store_api.S3_store(st_conf)
@@ -117,12 +124,12 @@ async def test_S3_store_store_readonly(tmpdir):
 		await st.close()
 
 @pytest.mark.asyncio
-async def test_S3_store_get_lazily(tmpdir):
+async def test_S3_store_get_lazily(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadatadata"*64
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	with temp_minio(tmpdir) as st_conf:
 		st = store_api.S3_store(st_conf)
@@ -144,12 +151,12 @@ async def test_S3_store_get_lazily(tmpdir):
 		await st.close()
 
 @pytest.mark.asyncio
-async def test_S3_store_get_object_summary(tmpdir):
+async def test_S3_store_get_object_summary(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadatadata"*64
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	with temp_minio(tmpdir) as st_conf:
 		st = store_api.S3_store(st_conf)
@@ -173,12 +180,12 @@ async def test_S3_store_get_object_summary(tmpdir):
 # reports as being un-covered
 
 @pytest.mark.asyncio
-async def test_Mock_store_store_readonly(tmpdir):
+async def test_Mock_store_store_readonly(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	st = store_api.Mock_store({"store_primary_bucket": "a", "store_backup_bucket": "b",
 	                           "store_region_name": "r"})
@@ -193,12 +200,12 @@ async def test_Mock_store_store_readonly(tmpdir):
 	
 
 @pytest.mark.asyncio
-async def test_Mock_store_deep_delete(tmpdir):
+async def test_Mock_store_deep_delete(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	st = store_api.Mock_store({"store_primary_bucket": "a", "store_backup_bucket": "b",
 	                           "store_region_name": "r"})

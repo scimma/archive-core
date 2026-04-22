@@ -13,9 +13,23 @@ from archive import database_api
 from archive import decision_api
 from archive import store_api
 
-from conftest import temp_environ, temp_postgres, MockHttpResponse
+from conftest import hopauth_mock, temp_environ, temp_postgres, MockHttpResponse
 
 pytest_plugins = ('pytest_asyncio',)
+
+pytestmark = [
+	pytest.mark.mock_topic_metadata(200, [
+		{"name": "t1", "archivable": True, "index_archived_text": True, "publicly_readable": True},
+		{"name": "t2", "archivable": True, "index_archived_text": True, "publicly_readable": True},
+		]),
+]
+
+decider_test_config = {
+    "hopauth_username": "Harpo",
+    "hopauth_api_url": "https://example.com/hopauth",
+    "text_index_message_size_limit": 1<<23,
+    "text_index_size_limit": 1<<16,
+}
 
 def test_DbFactory():
 	with mock.patch("archive.database_api.Mock_db", mock.MagicMock()) as mdb, \
@@ -91,8 +105,12 @@ async def get_mock_store():
 
 def generate_message(payload: bytes, topic: str, timestamp: int, public: bool=True, headers=[]):
 	metadata = Metadata(topic=topic, partition=0, offset=0, timestamp=timestamp, key="", headers=headers, _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(payload, metadata.headers, public=public)
+	topic_metadata = [{"name": topic, "archivable": True, "index_archived_text": True, 
+	                   "publicly_readable": public}]
+	with temp_environ(HOPAUTH_PASSWORD="Swordfish"), \
+	  mock.patch('requests.get', mock.MagicMock(return_value=MockHttpResponse(200, topic_metadata))), \
+	  decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(payload, metadata)
 	annotations['size'] = len(payload)
 	annotations['key'] = annotations["con_text_uuid"]
 	annotations['bucket'] = "bucket"
@@ -186,12 +204,12 @@ async def test_SQL_db_insert_readonly(tmpdir):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("index_text", (False, True))
-async def test_SQL_db_insert(tmpdir, index_text):
+async def test_SQL_db_insert(tmpdir, hopauth_mock, index_text):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 		text_to_index = decider.get_indexable_text(message, metadata.headers, annotations)
 
 	st = await get_mock_store()
@@ -232,7 +250,7 @@ async def test_SQL_db_insert(tmpdir, index_text):
 			assert len(tsr[0]) == 0, "Text search should not find an un-indexed message"
 
 @pytest.mark.asyncio
-async def test_SQL_db_set_indexed_text(tmpdir):
+async def test_SQL_db_set_indexed_text(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
@@ -243,12 +261,10 @@ async def test_SQL_db_set_indexed_text(tmpdir):
 	topic_metadata = [
 		{"name": "t1", "archivable": True, "index_archived_text": True}
 	]
-	with temp_environ(KAFKA_PASSWORD="test-pass", HOPAUTH_PASSWORD="test-api-pass"), \
-	     mock.patch('requests.get', mock.Mock(return_value=MockHttpResponse(200, topic_metadata))):
-		with decision_api.Decider(dConfig) as decider:
-			annotations = decider.get_annotations(message, metadata.headers)
-			text_to_index = decider.get_indexable_text(message, metadata.headers, annotations)
-			print(f"text_to_index: {text_to_index}")
+	with decision_api.Decider(dConfig) as decider:
+		annotations = decider.get_annotations(message, metadata)
+		text_to_index = decider.get_indexable_text(message, metadata.headers, annotations)
+		print(f"text_to_index: {text_to_index}")
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -297,12 +313,12 @@ async def test_SQL_db_set_indexed_text(tmpdir):
 		assert tsr[0][0].uuid == u
 
 @pytest.mark.asyncio
-async def test_SQL_db_fetch(tmpdir):
+async def test_SQL_db_fetch(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -329,12 +345,12 @@ async def test_SQL_db_fetch(tmpdir):
 		assert result.message_crc32 == annotations['con_message_crc32']
 
 @pytest.mark.asyncio
-async def test_SQL_db_uuid_in_db(tmpdir):
+async def test_SQL_db_uuid_in_db(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -348,12 +364,12 @@ async def test_SQL_db_uuid_in_db(tmpdir):
 		assert await db.uuid_in_db(u), "Item should be in the DB"
 
 @pytest.mark.asyncio
-async def test_SQL_db_exists_in_db(tmpdir):
+async def test_SQL_db_exists_in_db(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -367,7 +383,7 @@ async def test_SQL_db_exists_in_db(tmpdir):
 		assert await db.exists_in_db(metadata.topic, metadata.timestamp, annotations['con_message_crc32']), "Item should be in the DB"
 
 @pytest.mark.asyncio
-async def test_SQL_db_uuid_duplicates(tmpdir):
+async def test_SQL_db_uuid_duplicates(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	m1 = b"datadatadata"
 	meta1 = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
@@ -375,9 +391,9 @@ async def test_SQL_db_uuid_duplicates(tmpdir):
 	m2 = b"otherdata"
 	meta2 = Metadata(topic="t2", partition=0, offset=4, timestamp=19, key="", headers=[("_id",u.bytes)], _raw=None)
 	
-	with decision_api.Decider({}) as decider:
-		a1 = decider.get_annotations(m1, meta1.headers)
-		a2 = decider.get_annotations(m2, meta2.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		a1 = decider.get_annotations(m1, meta1)
+		a2 = decider.get_annotations(m2, meta2)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -402,7 +418,7 @@ async def test_SQL_db_uuid_duplicates(tmpdir):
 		assert len(result) == 0, "No duplicate should be found"
 
 @pytest.mark.asyncio
-async def test_SQL_db_content_duplicates(tmpdir):
+async def test_SQL_db_content_duplicates(tmpdir, hopauth_mock):
 	u1 = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	m1 = b"datadatadata"
 	meta1 = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u1.bytes)], _raw=None)
@@ -411,9 +427,9 @@ async def test_SQL_db_content_duplicates(tmpdir):
 	m2 = b"datadatadata"
 	meta2 = Metadata(topic="t1", partition=0, offset=4, timestamp=356, key="", headers=[("_id",u2.bytes)], _raw=None)
 
-	with decision_api.Decider({}) as decider:
-		a1 = decider.get_annotations(m1, meta1.headers)
-		a2 = decider.get_annotations(m2, meta2.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		a1 = decider.get_annotations(m1, meta1)
+		a2 = decider.get_annotations(m2, meta2)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -439,12 +455,12 @@ async def test_SQL_db_content_duplicates(tmpdir):
 		assert result[0][3] == a1["con_message_crc32"]
 
 @pytest.mark.asyncio
-async def test_SQL_db_get_message_id(tmpdir):
+async def test_SQL_db_get_message_id(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -461,12 +477,12 @@ async def test_SQL_db_get_message_id(tmpdir):
 		assert id is not None, "Inserted item should be found"
 
 @pytest.mark.asyncio
-async def test_SQL_db_get_message_locations(tmpdir):
+async def test_SQL_db_get_message_locations(tmpdir, hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -982,7 +998,7 @@ async def test_SQL_db_count_message_records_time_range(db_class, tmpdir):
 
 
 @pytest.mark.asyncio
-async def test_SQL_db_text_search(tmpdir):
+async def test_SQL_db_text_search(tmpdir, hopauth_mock):
 	with temp_postgres(tmpdir) as db_conf:
 		db = database_api.SQL_db(db_conf)
 		await db.connect()
@@ -1016,7 +1032,7 @@ async def test_SQL_db_text_search(tmpdir):
 		uuids = []
 		
 		i = 0
-		with decision_api.Decider({}) as decider:
+		with decision_api.Decider(decider_test_config) as decider:
 			for raw in messages:
 				p, m, a = generate_message(raw[0].encode("utf-8"), topic="t1", timestamp=i,
 				                           public=True, headers=raw[1])
@@ -1083,7 +1099,7 @@ async def test_SQL_db_text_search(tmpdir):
 
 
 @pytest.mark.asyncio
-async def test_SQL_db_text_search_access(tmpdir):
+async def test_SQL_db_text_search_access(tmpdir, hopauth_mock):
 	with temp_postgres(tmpdir) as db_conf:
 		db = database_api.SQL_db(db_conf)
 		await db.connect()
@@ -1104,7 +1120,7 @@ async def test_SQL_db_text_search_access(tmpdir):
 		}
 		
 		i = 0
-		with decision_api.Decider({}) as decider:
+		with decision_api.Decider(decider_test_config) as decider:
 			for raw in messages:
 				for topic in topics.keys():
 					p, m, a = generate_message(raw.encode("utf-8"), topic=topic, timestamp=i,
@@ -1145,7 +1161,7 @@ async def test_SQL_db_text_search_access(tmpdir):
 
 
 @pytest.mark.asyncio
-async def test_SQL_db_text_search_pagination(tmpdir):
+async def test_SQL_db_text_search_pagination(tmpdir, hopauth_mock):
 	with temp_postgres(tmpdir) as db_conf:
 		db = database_api.SQL_db(db_conf)
 		await db.connect()
@@ -1162,7 +1178,7 @@ async def test_SQL_db_text_search_pagination(tmpdir):
 		topics = ["t1", "t2"]
 		
 		i = 0
-		with decision_api.Decider({}) as decider:
+		with decision_api.Decider(decider_test_config) as decider:
 			for raw in messages:
 				for topic in topics:
 					p, m, a = generate_message(raw.encode("utf-8"), topic=topic, timestamp=i,
@@ -1189,7 +1205,7 @@ async def test_SQL_db_text_search_pagination(tmpdir):
 			assert result.timestamp == 3
 
 @pytest.mark.asyncio
-async def test_SQL_db_get_messages_not_text_indexed(tmpdir):
+async def test_SQL_db_get_messages_not_text_indexed(tmpdir, hopauth_mock):
 	with temp_postgres(tmpdir) as db_conf:
 		db = database_api.SQL_db(db_conf)
 		await db.connect()
@@ -1199,8 +1215,8 @@ async def test_SQL_db_get_messages_not_text_indexed(tmpdir):
 		u1 = uuid.uuid4()
 		message = b"datadatadata"
 		m1 = Metadata(topic="t1", partition=0, offset=0, timestamp=356, key="", headers=[("_id",u1.bytes)], _raw=None)
-		with decision_api.Decider({}) as decider:
-			a1 = decider.get_annotations(message, m1.headers)
+		with decision_api.Decider(decider_test_config) as decider:
+			a1 = decider.get_annotations(message, m1)
 		await st.store(message, m1, a1)
 		await db.insert(m1, a1, "")
 		
@@ -1210,8 +1226,8 @@ async def test_SQL_db_get_messages_not_text_indexed(tmpdir):
 		u2 = uuid.uuid4()
 		print(f"u2: {u2}")
 		m2 = Metadata(topic="t1", partition=0, offset=1, timestamp=359, key="", headers=[("_id",u2.bytes)], _raw=None)
-		with decision_api.Decider({}) as decider:
-			a2 = decider.get_annotations(message, m2.headers)
+		with decision_api.Decider(decider_test_config) as decider:
+			a2 = decider.get_annotations(message, m2)
 		await st.store(message, m2, a2)
 		await db.insert(m2, a2, None)
 		
@@ -1221,8 +1237,8 @@ async def test_SQL_db_get_messages_not_text_indexed(tmpdir):
 		
 		u3 = uuid.uuid4()
 		m3 = Metadata(topic="t1", partition=0, offset=2, timestamp=372, key="", headers=[("_id",u3.bytes)], _raw=None)
-		with decision_api.Decider({}) as decider:
-			a3 = decider.get_annotations(message, m3.headers)
+		with decision_api.Decider(decider_test_config) as decider:
+			a3 = decider.get_annotations(message, m3)
 		await st.store(message, m3, a3)
 		await db.insert(m3, a3, None)
 		
@@ -1274,11 +1290,11 @@ async def test_SQL_db_get_messages_not_fully_text_indexed(tmpdir):
 			m2 = Metadata(topic="t1", partition=0, offset=0, timestamp=359, key="", headers=[("_id",u2.bytes)], _raw=None)
 			u3 = uuid.uuid4()
 			m3 = Metadata(topic="t1", partition=0, offset=0, timestamp=372, key="", headers=[("_id",u3.bytes)], _raw=None)
-			with decision_api.Decider({}) as decider:
-				a1 = decider.get_annotations(message, m1.headers)
+			with decision_api.Decider(decider_test_config) as decider:
+				a1 = decider.get_annotations(message, m1)
 				t1 = decider.get_indexable_text(message, m1.headers, a1)
-				a2 = decider.get_annotations(message, m2.headers)
-				a3 = decider.get_annotations(message, m3.headers)
+				a2 = decider.get_annotations(message, m2)
+				a3 = decider.get_annotations(message, m3)
 		await st.store(message, m1, a1)
 		await db.insert(m1, a1, t1)
 		
@@ -1365,12 +1381,12 @@ async def test_Base_db_unimlemented():
 		await db.count_message_records()
 
 @pytest.mark.asyncio
-async def test_Mock_db_get_message_id():
+async def test_Mock_db_get_message_id(hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations
@@ -1396,12 +1412,12 @@ async def test_Mock_db_insert_readonly():
 	assert "This database object is set to read-only; insert is forbidden" in str(err)
 
 @pytest.mark.asyncio
-async def test_Mock_db_fetch():
+async def test_Mock_db_fetch(hopauth_mock):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
 	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
-	with decision_api.Decider({}) as decider:
-		annotations = decider.get_annotations(message, metadata.headers)
+	with decision_api.Decider(decider_test_config) as decider:
+		annotations = decider.get_annotations(message, metadata)
 
 	st = await get_mock_store()
 	# we need to do this to get the last of the required annotations

@@ -1,3 +1,4 @@
+import collections
 from contextlib import contextmanager
 import logging
 import os
@@ -7,6 +8,7 @@ import shutil
 import subprocess
 import time
 from typing import List
+from unittest.mock import patch, MagicMock
 
 try:
 	import docker
@@ -67,6 +69,23 @@ def temp_wd(path):
 		yield  # no value needed
 	finally:
 		os.chdir(orig_dir)
+
+
+@pytest.fixture
+def hopauth_test_cred():
+	with temp_environ(HOPAUTH_USERNAME="Harpo", HOPAUTH_PASSWORD="Swordfish"):
+		yield  # no value
+
+
+@pytest.fixture
+def hopauth_mock(request, hopauth_test_cred):
+	mark = request.node.get_closest_marker("mock_topic_metadata")
+	if mark is None:
+		result = MockHttpResponse(200, [])
+	else:
+		result = MockHttpResponse(mark.args[0], mark.args[1])
+	with patch('requests.get', MagicMock(return_value=result)):
+		yield result
 
 
 def check_command_availability(command: str, args: List[str] = []):
@@ -445,3 +464,10 @@ def temp_minio(tmpdir):
 			}
 	finally:
 		ms.close()
+
+def pytest_configure(config):
+	with open("/Users/christopher/Work/SCiMMA/archive-core/del.txt", 'w') as f:
+		f.write("pytest_configure called")
+	config.addinivalue_line(
+		"markers", "mock_topic_metadata(status, json): data for the hopauth_mock fixture"
+	)

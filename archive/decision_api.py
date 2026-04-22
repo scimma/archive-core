@@ -59,18 +59,10 @@ class Decider:
 		self.magic = magic.Magic(flags=magic.MAGIC_MIME_TYPE)
 		self.text_index_message_size_limit = config.get("text_index_message_size_limit", 1<<22)
 		self.text_index_size_limit = config.get("text_index_size_limit", 1<<14)
-		try:
-			self.hopauth_auth = utility_api.get_hopskotch_credential(config)
-			try:
-				self.auth_api_url = config["hopauth_api_url"]
-			except:
-				raise RuntimeError("Hopauth API URL not configured")
-		except RuntimeError as err:
-			if len(err.args) > 0 and (err.args[0] == "Hopauth API credentials not configured"
-			  or err.args[0] == "Hopauth API URL not configured"):
-				logging.warning(f"{err.args[0]}: Text indexing will be disabled")
-			else:
-				raise
+		self.hopauth_auth = utility_api.get_hopskotch_credential(config)
+		if "hopauth_api_url" not in config or not config["hopauth_api_url"]:
+			raise RuntimeError("Hopauth API URL not configured")
+		self.auth_api_url = config["hopauth_api_url"]
 		self.topic_metadata = {}
 		self.topic_metadata_check_period = 300
 		self.topic_metadata_timestamp = time.time() - self.topic_metadata_check_period
@@ -173,23 +165,23 @@ class Decider:
 		return magic_format
 	
 	
-	def get_annotations(self, message, headers=[], public: bool=True, direct_upload: bool=False):
+	def get_annotations(self, message, metadata, direct_upload: bool=False):
 		"""
 		Assign standard annotations to a message based on its contents and any headers
 		
 		Return: A dictionary of annotations
 		"""
 		annotations = {}
-		text_uuid, is_client_uuid  = self.get_text_uuid(headers)
+		text_uuid, is_client_uuid  = self.get_text_uuid(metadata.headers)
 		annotations["con_text_uuid"] = text_uuid
 		annotations["con_is_client_uuid"] = is_client_uuid
 		annotations["con_message_crc32"] = message.crc32() if hasattr(message, "crc32") else zlib.crc32(message)
-		annotations["public"] = public
+		annotations["public"] = self.topic_is_public(metadata.topic, metadata.timestamp/1000.)
 		annotations["direct_upload"] = direct_upload
-		annotations["media_type"] = self.get_data_format(message, headers)
-		annotations["title"] = self.get_string_header(headers, "title")
-		annotations["sender"] = self.get_string_header(headers, "_sender")
-		annotations["file_name"] = self.get_string_header(headers, "file_name")
+		annotations["media_type"] = self.get_data_format(message, metadata.headers)
+		annotations["title"] = self.get_string_header(metadata.headers, "title")
+		annotations["sender"] = self.get_string_header(metadata.headers, "_sender")
+		annotations["file_name"] = self.get_string_header(metadata.headers, "file_name")
 		return annotations
 	
 	
@@ -217,16 +209,63 @@ class Decider:
 
 
 	def _fetch_topic_metadata(self):
-		if not hasattr(self, "hopauth_auth") or not hasattr(self, "auth_api_url"):
-			# update the timestamp as if we fetched data, to avoid constantly retrying
-			self.topic_metadata_timestamp = time.time()
-			return
 		http_auth = http_scram.SCRAMAuth(self.hopauth_auth, shortcut=True)
 		resp = requests.get(f"{self.auth_api_url}/v1/topics", auth=http_auth)
 		if not resp.ok:
 			raise RuntimeError(f"Failed to contact hopauth API: {resp.status_code}")
 		self.topic_metadata = {t["name"]:t for t in resp.json()}
 		self.topic_metadata_timestamp = time.time()
+
+
+	def _metadata_for_topic(self, topic, msg_time):
+		"""
+		Gets the current metadata for the given topic, assuming application to a message from the
+		specified time.
+		
+		Args:
+		    topic: The name of the topic on which the mesage was sent
+		    msg_time: The timestamp of the message, in seconds (not milliseconds as used by Kafka)
+		Return:
+		    The topic metadata dictionary, or None if the topic is unknown
+		"""
+		if time.time() > self.topic_metadata_timestamp + self.topic_metadata_check_period:
+			self._fetch_topic_metadata()
+		elif topic not in self.topic_metadata and msg_time > self.topic_metadata_timestamp:
+			# A recent message might arrive on a topic which is unknown because it was created since
+			# the last metadata check, in which case we should update metadata.
+			# It can also be the case that a message is old and on a topic which has since been
+			# deleted, in which case we should not check, as we do not want to check on each old
+			# message.
+			self._fetch_topic_metadata()
+
+		return self.topic_metadata.get(topic, None)
+
+
+	def _effective_topic_name(self, topic):
+		"""
+		Compute the effective topic name, accounting for large-message offload pseudo-topics
+		"""
+		# compute effective topic name, accounting for large-message offload pseudo-topics
+		offload_suffix = "+oversized"
+		if topic.endswith(offload_suffix):
+			topic = topic[:-len(offload_suffix)]
+		return topic
+
+
+	def topic_is_public(self, topic, msg_time):
+		"""
+		Determine whether a message on a given topic should is public
+		
+		Args:
+		    topic: The name of the topic on which the mesage was sent
+		    msg_time: The timestamp of the message, in seconds (not milliseconds as used by Kafka)
+		"""
+		topic = self._effective_topic_name(topic)
+		metadata = self._metadata_for_topic(topic, msg_time)
+		if metadata is not None:
+			print(f"Metadata for {topic}: {metadata}")
+			return metadata.get("publicly_readable", False)
+		return False
 
 
 	def should_index_topic(self, topic, msg_time):
@@ -237,21 +276,11 @@ class Decider:
 		    topic: The name of the topic on which the mesage was sent
 		    msg_time: The timestamp of the message, in seconds (not milliseconds as used by Kafka)
 		"""
-		# compute effective topic name, accounting for large-message offload pseudo-topics
-		offload_suffix = "+oversized"
-		if topic.endswith(offload_suffix):
-			topic = topic[:-len(offload_suffix)]
-		
-		if time.time() > self.topic_metadata_timestamp + self.topic_metadata_check_period:
-			self._fetch_topic_metadata()
-		elif topic not in self.topic_metadata and msg_time > self.topic_metadata_timestamp:
-			# A recent message might arrive on a topic which is unknown because it was created since
-			# the last metadata check, in which case we should update metadata.
-			# It can also be the case that a message is old and on a topic which has since been
-			# deleted, in which case we should not check, as we do not want to check on each old
-			# message.
-			self._fetch_topic_metadata()
-		return topic in self.topic_metadata and self.topic_metadata[topic]["index_archived_text"]
+		topic = self._effective_topic_name(topic)
+		metadata = self._metadata_for_topic(topic, msg_time)
+		if metadata is not None:
+			return metadata["index_archived_text"]
+		return False
 
 
 	def get_indexable_text(self, message, headers, annotations):

@@ -11,7 +11,7 @@ from archive import database_api
 from archive import decision_api
 from archive import store_api
 
-from conftest import temp_environ, MockHttpResponse
+from conftest import hopauth_mock, temp_environ, MockHttpResponse
 
 pytest_plugins = ('pytest_asyncio',)
 
@@ -32,24 +32,20 @@ def test_decision_init():
         assert dec.text_index_message_size_limit == decider_test_config["text_index_message_size_limit"]
         assert dec.text_index_size_limit == decider_test_config["text_index_size_limit"]
 
-def test_decision_init_no_cred(caplog):
+def test_decision_init_no_cred():
     config_no_api_username = dict(decider_test_config)
     del config_no_api_username["hopauth_username"]
-    dec_no_cred = decision_api.Decider(config_no_api_username)
-    assert len(caplog.record_tuples) == 1
-    assert caplog.record_tuples[0][1] == logging.WARNING
-    assert "Hopauth API credentials not configured" in caplog.record_tuples[0][2]
-    assert "Text indexing will be disabled" in caplog.record_tuples[0][2]
+    with pytest.raises(RuntimeError) as err:
+        dec_no_cred = decision_api.Decider(config_no_api_username)
+    assert "Hopauth API credentials not configured" in err.value.args
 
-def test_decision_init_no_api_url(caplog):
+def test_decision_init_no_api_url():
     with temp_environ(HOPAUTH_PASSWORD="Swordfish"):
         config_no_api_url = dict(decider_test_config)
         del config_no_api_url["hopauth_api_url"]
-        dec_no_url = decision_api.Decider(config_no_api_url)
-        assert len(caplog.record_tuples) == 1
-        assert caplog.record_tuples[0][1] == logging.WARNING
-        assert "Hopauth API URL not configured" in caplog.record_tuples[0][2]
-        assert "Text indexing will be disabled" in caplog.record_tuples[0][2]
+        with pytest.raises(RuntimeError) as err:
+            dec_no_url = decision_api.Decider(config_no_api_url)
+        assert "Hopauth API URL not configured" in err.value.args
 
 def test_decision_init_bad_credfile(tmpdir):
     with temp_environ(XDG_CONFIG_HOME=str(tmpdir)), \
@@ -63,7 +59,7 @@ def test_decision_init_bad_credfile(tmpdir):
         dec_no_cred = decision_api.Decider(config_no_api_username)
 
 @pytest.mark.asyncio
-async def test_is_content_identical():
+async def test_is_content_identical(hopauth_mock):
     config = {
         "db_type": "mock",
         "store_type": "mock",
@@ -84,9 +80,9 @@ async def test_is_content_identical():
     m3 = (b"somethingelse",
           Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[], _raw=None))
     
-    with decision_api.Decider({}) as decider:
+    with decision_api.Decider(decider_test_config) as decider:
         async def store(payload, metadata):
-            annotations = decider.get_annotations(payload, metadata.headers)
+            annotations = decider.get_annotations(payload, metadata)
             await st.store(payload, metadata, annotations)
             await db.insert(metadata, annotations)
             return annotations["con_text_uuid"]
@@ -100,8 +96,8 @@ async def test_is_content_identical():
         ids.append(await db.get_message_id(await store(*m3)))
         assert not await is_content_identical(ids, db, st), "Messages with the different content are not identical"
 
-def test_get_text_uuid():
-    with decision_api.Decider({}) as decider:
+def test_get_text_uuid(hopauth_mock):
+    with decision_api.Decider(decider_test_config) as decider:
         ui1 = uuid.uuid4()
         uo1 = decider.get_text_uuid([("_id", ui1.bytes)])
         assert uo1[0] == str(ui1)
@@ -130,8 +126,8 @@ def test_get_text_uuid():
         uuid.UUID(hex=uo4[0])
         assert not uo4[1], "UUID should be marked as originating from the server"
 
-def test_get_string_header():
-    with decision_api.Decider({}) as d:
+def test_get_string_header(hopauth_mock):
+    with decision_api.Decider(decider_test_config) as d:
         assert d.get_string_header(None, "foo") == ""
         
         assert d.get_string_header([("foo", b"bar")], "foo") == "bar"
@@ -195,8 +191,8 @@ voevent_xml = b"""<?xml version='1.0' encoding='UTF-8'?>
 </voe:VOEvent>
 """
 
-def test_get_data_format():
-    with decision_api.Decider({}) as d:
+def test_get_data_format(hopauth_mock):
+    with decision_api.Decider(decider_test_config) as d:
         voevent = hop.models.VOEvent.load(voevent_xml)
         m, h = hop.io.Producer.pack(voevent)
         detected = d.get_data_format(m, h)
@@ -270,9 +266,10 @@ def test_get_data_format():
         detected = d.get_data_format(m, h)
         assert detected == "application/octet-stream"
 
-def test_get_annotations():
-    with decision_api.Decider({}) as decider:
-        m1 = (b"abcdefgh",[])
+def test_get_annotations(hopauth_mock):
+    with decision_api.Decider(decider_test_config) as decider:
+        m1 = (b"abcdefgh", 
+              Metadata(topic="t1", partition=0, offset=0, timestamp=0, key="", headers=[], _raw=None))
         a1 = decider.get_annotations(m1[0], m1[1])
         assert "con_text_uuid" in a1
         uuid.UUID(a1["con_text_uuid"])
@@ -281,7 +278,8 @@ def test_get_annotations():
         assert "con_message_crc32" in a1
         
         u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
-        m2 = (b"0123456789",[("_id",u.bytes)])
+        m2 = (b"0123456789",
+              Metadata(topic="t1", partition=0, offset=0, timestamp=0, key="", headers=[("_id",u.bytes)], _raw=None))
         a2 = decider.get_annotations(m2[0], m2[1])
         assert "con_text_uuid" in a2
         assert uuid.UUID(a2["con_text_uuid"]) == u
@@ -290,9 +288,11 @@ def test_get_annotations():
         assert "con_message_crc32" in a2
 
 @pytest.mark.asyncio
-async def test_is_deemed_duplicate():
+async def test_is_deemed_duplicate(hopauth_mock):
     config = {
         "db_type": "mock",
+        "hopauth_api_url": "https://example.com/hopauth",
+        "hopauth_username": "Harpo",
         "store_type": "mock",
         "store_primary_bucket": "b1",
         "store_backup_bucket": "b2",
@@ -319,20 +319,20 @@ async def test_is_deemed_duplicate():
             await db.insert(metadata, annotations)
             return annotations["con_text_uuid"]
         
-        a1 = decider.get_annotations(m1[0], m1[1].headers)
+        a1 = decider.get_annotations(m1[0], m1[1])
         assert not await decider.is_deemed_duplicate(a1, m1[1], db, st), "With no messages stored, a message cannot be a duplicate"
         await store(m1[0], m1[1], a1)
         
-        a2 = decider.get_annotations(m2[0], m2[1].headers)
+        a2 = decider.get_annotations(m2[0], m2[1])
         assert await decider.is_deemed_duplicate(a2, m2[1], db, st), "A message with the same body, timestamp, and topic is a duplicate"
         
-        a3 = decider.get_annotations(m3[0], m3[1].headers)
+        a3 = decider.get_annotations(m3[0], m3[1])
         assert not await decider.is_deemed_duplicate(a3, m3[1], db, st), "A message with a new UUID is not a duplicate"
         await store(m3[0], m3[1], a3)
         
         assert await decider.is_deemed_duplicate(a3, m3[1], db, st), "The same message again is a duplicate"
         
-        a4 = decider.get_annotations(m4[0], m4[1].headers)
+        a4 = decider.get_annotations(m4[0], m4[1])
         assert a4["con_text_uuid"] == str(u)
         assert a4["con_is_client_uuid"]
         assert not await decider.is_deemed_duplicate(a4, m4[1], db, st), "A message with a new UUID is not a duplicate"
@@ -340,20 +340,18 @@ async def test_is_deemed_duplicate():
         assert not a4["con_is_client_uuid"]
         await store(m4[0], m4[1], a4)
 
-def test__fetch_topic_metadata():
-    topic_metadata = [
-        {"name": "t1", "archivable": True, "index_archived_text": True},
-        {"name": "t2", "archivable": True, "index_archived_text": False},
-    ]
-    with temp_environ(HOPAUTH_PASSWORD="Swordfish"):
-        with patch("archive.decision_api.time.time", MagicMock(return_value=0.0)):
-            dec = decision_api.Decider(decider_test_config)
+@pytest.mark.mock_topic_metadata(200, [
+        {"name": "t1", "archivable": True, "index_archived_text": True, "publicly_readable": True},
+        {"name": "t2", "archivable": True, "index_archived_text": False, "publicly_readable": True},
+    ])
+def test__fetch_topic_metadata(hopauth_mock):
+    with patch("archive.decision_api.time.time", MagicMock(return_value=0.0)):
+        dec = decision_api.Decider(decider_test_config)
     
-    with patch("archive.decision_api.time.time", MagicMock(return_value=1.0)), \
-            patch('requests.get', MagicMock(return_value=MockHttpResponse(200, topic_metadata))):
+    with patch("archive.decision_api.time.time", MagicMock(return_value=1.0)):
         dec._fetch_topic_metadata()
     assert dec.topic_metadata_timestamp == 1.0
-    for record in topic_metadata:
+    for record in hopauth_mock.json_data:
         assert record["name"] in dec.topic_metadata
         assert dec.topic_metadata[record["name"]] == record
     
@@ -364,17 +362,15 @@ def test__fetch_topic_metadata():
     # fetch time should not change after failed fetch
     assert dec.topic_metadata_timestamp == 1.0
 
-def test_should_index_topic():
-    topic_metadata = [
-        {"name": "t1", "archivable": True, "index_archived_text": True},
-        {"name": "t2", "archivable": True, "index_archived_text": False},
-    ]
-    with temp_environ(HOPAUTH_PASSWORD="Swordfish"):
-        with patch("archive.decision_api.time.time", MagicMock(return_value=0.0)):
-            dec = decision_api.Decider(decider_test_config)
+@pytest.mark.mock_topic_metadata(200, [
+        {"name": "t1", "archivable": True, "index_archived_text": True, "publicly_readable": True},
+        {"name": "t2", "archivable": True, "index_archived_text": False, "publicly_readable": True},
+    ])
+def test_should_index_topic(hopauth_mock):
+    with patch("archive.decision_api.time.time", MagicMock(return_value=0.0)):
+        dec = decision_api.Decider(decider_test_config)
     
-    with patch("archive.decision_api.time.time", MagicMock(return_value=10.0)), \
-            patch('requests.get', MagicMock(return_value=MockHttpResponse(200, topic_metadata))):
+    with patch("archive.decision_api.time.time", MagicMock(return_value=10.0)):
         si = dec.should_index_topic("t1", 5)
         assert si
         assert dec.topic_metadata_timestamp == 10.0
@@ -391,26 +387,25 @@ def test_should_index_topic():
         si = dec.should_index_topic("t3", -1000)
         assert not si, "an old message on an unknown topic should not be indexed"
     
-    topic_metadata.append({"name": "t3", "archivable": True, "index_archived_text": True})
-    with patch("archive.decision_api.time.time", MagicMock(return_value=20.0)), \
-            patch('requests.get', MagicMock(return_value=MockHttpResponse(200, topic_metadata))):
+    hopauth_mock.json_data.append({"name": "t3", "archivable": True, "index_archived_text": True})
+    with patch("archive.decision_api.time.time", MagicMock(return_value=20.0)):
         si = dec.should_index_topic("t3", 15)
         assert si, "a new message on an unknown topic should trigger a new metadata lookup"
     
-    with patch("archive.decision_api.time.time", MagicMock(return_value=30.0)), \
-            patch('requests.get', MagicMock(return_value=MockHttpResponse(200, topic_metadata))):
+    with patch("archive.decision_api.time.time", MagicMock(return_value=30.0)):
         si = dec.should_index_topic("t4", 25)
         assert not si, "a new message on an unknown topic should not be indexed " \
                        "if it is still unknown after the new lookup"
 
 @pytest.mark.asyncio
-async def test_get_indexable_text_from_headers():
+async def test_get_indexable_text_from_headers(hopauth_mock):
     u = uuid.uuid4()
-    with decision_api.Decider({}) as d:
+    with decision_api.Decider(decider_test_config) as d:
         m = b"datadatadata"
-        h = [("title", b"The Unstrung Harp"), ("_sender", b"egorey-917a2d4c"), ("_id", u.bytes)]
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=0, timestamp=172, key="", _raw=None,
+                     headers=[("title", b"The Unstrung Harp"), ("_sender", b"egorey-917a2d4c"), ("_id", u.bytes)])
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         assert "title" in text
         assert "The Unstrung Harp" in text
         assert "sender" in text
@@ -418,55 +413,59 @@ async def test_get_indexable_text_from_headers():
         assert "id" not in text
         
         m = b"datadatadata"
-        h = [("binary", b"\x00not\xE0\x01valid\xF0\x10utf8"), ("_id", u.bytes)]
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=0, timestamp=172, key="", _raw=None, 
+                     headers=[("binary", b"\x00not\xE0\x01valid\xF0\x10utf8"), ("_id", u.bytes)])
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         assert "binary" not in text
         assert "valid" not in text
         assert "id" not in text
 
 @pytest.mark.asyncio
-async def test_get_indexable_text_message():
+async def test_get_indexable_text_message(hopauth_mock):
     config = {
+        "hopauth_api_url": "https://example.com/hopauth",
+        "hopauth_username": "Harpo",
         "text_index_message_size_limit": 1<<20,
         "text_index_size_limit": 1<<12,
     }
     with decision_api.Decider(config) as d:
         m = b"datadatadata"
-        h = []
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=0, timestamp=0, key="", headers=[], _raw=None)
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         assert "datadatadata" in text
         
         m = 2048 * b"abc "
-        h = []
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=1, timestamp=1, key="", headers=[], _raw=None)
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         assert len(text) == config["text_index_size_limit"]
         assert "abc abc abc" in text
         
         m = b"U+4W7m+XlVvlifYX1/nW4b42itr183agMHTEIvMotv6bLIBomHyJZkL7AfCCcG/" \
             b"lgBXqSJmQTK0kcZThCCz2gt65M4xZFbFnV2dX9TKsRQws9rDnBaX5VBzSvJvZK5" \
             b"BEYBwVQtN9v03qtMdlzb6PgEKI0cVDmFC6EqVnFeg3Ae8="
-        h = []
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=2, timestamp=2, key="", headers=[], _raw=None)
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         assert len(text) == 0, "long, high-entropy strings should not be indexed"
         
         m = b"not\xE0\x01valid\xF0\x10utf8"
-        h = []
-        a = d.get_annotations(m, h)
+        e = Metadata(topic="t1", partition=0, offset=3, timestamp=3, key="", headers=[], _raw=None)
+        a = d.get_annotations(m, e)
         # libmagic is too canny to be fooled by our invalid UTF-8; override it to test other defenses
         a["media_type"] = "text/plain"
-        text = d.get_indexable_text(m, h, a)
+        text = d.get_indexable_text(m, e.headers, a)
         assert len(text) == 0, "Non-UTF-8 data should not be indexed"
         
         jsonblob = hop.models.JSONBlob({"foo": "bar", 
                                         "baz":{"quux": [1, "some text", 3], 
                                                "xen": False, "hom": 3.6}})
         m, h = hop.io.Producer.pack(jsonblob)
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=4, timestamp=4, key="", headers=h, _raw=None)
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         assert "foo" in text
         assert "bar" in text
         assert "some text" in text
@@ -478,8 +477,9 @@ async def test_get_indexable_text_message():
                                                "xen": False, "hom": 3.6,
                                                "drel": b"Actually a valid UTF-8 string"}})
         m, h = hop.io.Producer.pack(avroblob)
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=5, timestamp=5, key="", headers=h, _raw=None)
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         assert "foo" in text
         assert "bar" in text
         assert "some text" in text
@@ -506,8 +506,9 @@ async def test_get_indexable_text_message():
                 """
         )
         m, h = hop.io.Producer.pack(gcncircular)
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=6, timestamp=6, key="", headers=h, _raw=None)
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         for key, value in gcncircular.header.items():
             assert key in text
             assert value in text
@@ -525,8 +526,9 @@ async def test_get_indexable_text_message():
             b'ENERGY:           1.2126e+02 [TeV]\n'
         )
         m, h = hop.io.Producer.pack(gcntextnotice)
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=7, timestamp=7, key="", headers=h, _raw=None)
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         for field in ["TITLE", "NOTICE_DATE", "NOTICE_TYPE", "SRC_RA", "SRC_DEC", "DISCOVERY_DATE",
                       "DISCOVERY_TIME", "ENERGY"]:
             assert field.lower() in text
@@ -535,8 +537,9 @@ async def test_get_indexable_text_message():
         
         voevent = hop.models.VOEvent.load(voevent_xml)
         m, h = hop.io.Producer.pack(voevent)
-        a = d.get_annotations(m, h)
-        text = d.get_indexable_text(m, h, a)
+        e = Metadata(topic="t1", partition=0, offset=8, timestamp=8, key="", headers=h, _raw=None)
+        a = d.get_annotations(m, e)
+        text = d.get_indexable_text(m, e.headers, a)
         print(text)
         assert "LIGO" in text
         assert "Virgo" in text

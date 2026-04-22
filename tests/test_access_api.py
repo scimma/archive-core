@@ -7,9 +7,15 @@ import uuid
 from archive import access_api
 from archive import store_api
 
-from conftest import temp_environ
+from conftest import hopauth_mock, temp_environ
 
 pytest_plugins = ('pytest_asyncio',)
+
+pytestmark = [
+	pytest.mark.mock_topic_metadata(200, [
+		{"name": "t1", "archivable": True, "index_archived_text": True, "publicly_readable": True},
+		]),
+]
 
 def test_add_parser_options(tmpdir):
     parser = argparse.ArgumentParser()
@@ -28,13 +34,15 @@ def test_add_parser_options(tmpdir):
 
 def get_mock_config():
     return {"db_type": "mock",
+            "hopauth_api_url": "http://example.com/hop_auth",
+            "hopauth_username": "hopauth_user",
             "store_type": "mock",
             "store_primary_bucket": "archive",
             "store_backup_bucket": "backup",
 	        "store_region_name": "eu-north-3"}
 
 @pytest.mark.asyncio
-async def test_archive_access_startup_shutdown():
+async def test_archive_access_startup_shutdown(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     assert not aa.read_only
     assert not aa.db.connected
@@ -58,7 +66,7 @@ async def test_archive_access_startup_shutdown():
     assert aa.store.read_only
 
 @pytest.mark.asyncio
-async def test_archive_access_store_message():
+async def test_archive_access_store_message(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
@@ -80,7 +88,7 @@ async def test_archive_access_store_message():
     assert data["annotations"]["con_text_uuid"] == str(u)
 
 @pytest.mark.asyncio
-async def test_archive_access_store_message_no_uuid():
+async def test_archive_access_store_message_no_uuid(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
@@ -100,7 +108,7 @@ async def test_archive_access_store_message_no_uuid():
     assert data["message"] == message
 
 @pytest.mark.asyncio
-async def test_archive_access_store_message_duplicate_uuid():
+async def test_archive_access_store_message_duplicate_uuid(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
@@ -114,7 +122,7 @@ async def test_archive_access_store_message_duplicate_uuid():
     assert not r[0], "Repeated insertion should fail"
 
 @pytest.mark.asyncio
-async def test_archive_access_store_message_duplicate_wo_uuid():
+async def test_archive_access_store_message_duplicate_wo_uuid(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
@@ -127,7 +135,7 @@ async def test_archive_access_store_message_duplicate_wo_uuid():
     assert not r[0], "Repeated insertion should fail"
 
 @pytest.mark.asyncio
-async def test_archive_access_get_metadata():
+async def test_archive_access_get_metadata(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
@@ -143,8 +151,16 @@ async def test_archive_access_get_metadata():
     assert r.timestamp == metadata.timestamp
     assert r.uuid == str(u)
 
+def every_other_topic_public():
+    topic_metadata = []
+    for i in range(0,10):
+        topic_metadata.append({"name": f"t{i}", "archivable": True, "index_archived_text": False,
+                               "publicly_readable": i % 2 == 0})
+    return topic_metadata
+
 @pytest.mark.asyncio
-async def test_archive_access_get_topics_with_public_messages():
+@pytest.mark.mock_topic_metadata(200, every_other_topic_public())
+async def test_archive_access_get_topics_with_public_messages(hopauth_mock):
     messages = []
     for i in range(0,10):
         ms = b"datadatadata"
@@ -155,13 +171,13 @@ async def test_archive_access_get_topics_with_public_messages():
     await aa.connect()
     
     for m in messages:
-        await aa.store_message(m[0],m[1], public=(m[1].offset % 2 == 0))
+        await aa.store_message(m[0],m[1])
     
     pub_top = await aa.get_topics_with_public_messages()
     assert len(pub_top) == 5
 
 @pytest.mark.asyncio
-async def test_archive_access_get_message_records():
+async def test_archive_access_get_message_records(hopauth_mock):
     messages = []
     for i in range(0,10):
         ms = b"datadatadata"
@@ -205,7 +221,7 @@ async def test_archive_access_get_message_records():
     assert p is None
 
 @pytest.mark.asyncio
-async def test_archive_access_count_message_records():
+async def test_archive_access_count_message_records(hopauth_mock):
     messages = []
     for i in range(0,10):
         ms = b"datadatadata"
@@ -228,7 +244,7 @@ async def test_archive_access_count_message_records():
     assert c == 0
 
 @pytest.mark.asyncio
-async def test_archive_access_get_object_lazily():
+async def test_archive_access_get_object_lazily(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
@@ -249,7 +265,7 @@ async def test_archive_access_get_object_lazily():
     assert not_found is None
 
 @pytest.mark.asyncio
-async def test_archive_access_get_raw_object():
+async def test_archive_access_get_raw_object(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
@@ -268,7 +284,7 @@ async def test_archive_access_get_raw_object():
     assert not_found is None
 
 @pytest.mark.asyncio
-async def test_archive_access_get_all():
+async def test_archive_access_get_all(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
@@ -290,7 +306,7 @@ async def test_archive_access_get_all():
     assert not_found is None
 
 @pytest.mark.asyncio
-async def test_archive_access_get_as_sent():
+async def test_archive_access_get_as_sent(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
@@ -313,7 +329,7 @@ async def test_archive_access_get_as_sent():
     assert not_found is None
 
 @pytest.mark.asyncio
-async def test_archive_access_get_object_summary():
+async def test_archive_access_get_object_summary(hopauth_mock):
     aa = access_api.Archive_access(get_mock_config())
     await aa.connect()
     
