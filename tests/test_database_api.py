@@ -31,6 +31,15 @@ decider_test_config = {
     "text_index_size_limit": 1<<16,
 }
 
+@contextmanager
+def dummy_db_ctx(tmpdir):
+	yield {}
+
+ctx_for_db = {
+	database_api.SQL_db: temp_postgres,
+	database_api.Mock_db: dummy_db_ctx,
+}
+
 def test_DbFactory():
 	with mock.patch("archive.database_api.Mock_db", mock.MagicMock()) as mdb, \
 	     mock.patch("archive.database_api.SQL_db", mock.MagicMock()) as sdb, \
@@ -170,6 +179,8 @@ async def test_SQL_db_create(tmpdir):
 		"sender": "text",
 		"media_type": "text",
 		"file_name": "text",
+		"originator": "text",
+		"retracted": "boolean"
 	}
 
 	with temp_postgres(tmpdir) as db_conf:
@@ -207,7 +218,9 @@ async def test_SQL_db_insert_readonly(tmpdir):
 async def test_SQL_db_insert(tmpdir, hopauth_mock, index_text):
 	u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
 	message = b"datadatadata"
-	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
+	metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", 
+	                    headers=[("_id", u.bytes), ("originator", b"zaphod@beeblebrox.com")],
+	                    _raw=None)
 	with decision_api.Decider(decider_test_config) as decider:
 		annotations = decider.get_annotations(message, metadata)
 		text_to_index = decider.get_indexable_text(message, metadata.headers, annotations)
@@ -223,7 +236,7 @@ async def test_SQL_db_insert(tmpdir, hopauth_mock, index_text):
 		async with db.engine.connect() as conn:
 			result = (await conn.execute(sqlalchemy.text("SELECT * FROM messages"))).all()
 		assert len(result) == 1, "One row should be found"
-		assert len(result[0]) == 16
+		assert len(result[0]) == 18
 		# first column is the id; we don't care about its value
 		print(result[0])
 		assert result[0][1] == metadata.topic
@@ -241,6 +254,8 @@ async def test_SQL_db_insert(tmpdir, hopauth_mock, index_text):
 		assert result[0][13] == annotations['sender']
 		assert result[0][14] == annotations['media_type']
 		assert result[0][15] == annotations['file_name']
+		assert result[0][16] == annotations['originator']
+		assert result[0][17] == False # not retracted
 
 		tsr = await db.search_message_text("datadatadata")
 		if index_text:
@@ -277,7 +292,7 @@ async def test_SQL_db_set_indexed_text(tmpdir, hopauth_mock):
 		async with db.engine.connect() as conn:
 			result = (await conn.execute(sqlalchemy.text("SELECT * FROM messages"))).all()
 		assert len(result) == 1, "One row should be found"
-		assert len(result[0]) == 16
+		assert len(result[0]) == 18
 		# first column is the id; we don't care about its value
 		print(result[0])
 		assert result[0][1] == metadata.topic
@@ -295,6 +310,8 @@ async def test_SQL_db_set_indexed_text(tmpdir, hopauth_mock):
 		assert result[0][13] == annotations['sender']
 		assert result[0][14] == annotations['media_type']
 		assert result[0][15] == annotations['file_name']
+		assert result[0][16] == annotations['originator']
+		assert result[0][17] == False # not retracted
 		
 		tsr = await db.search_message_text("datadatadata")
 		assert len(tsr[0]) == 0, "Text search should not find an un-indexed message"
@@ -502,7 +519,7 @@ async def test_SQL_db_get_message_locations(tmpdir, hopauth_mock):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_SQL_db_get_topics_with_public_messages(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -530,7 +547,7 @@ async def test_SQL_db_get_topics_with_public_messages(db_class, tmpdir):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_db_get_message_records_public(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -582,7 +599,7 @@ async def test_db_get_message_records_public(db_class, tmpdir):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_SQL_db_get_message_records_full(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -644,7 +661,7 @@ async def test_SQL_db_get_message_records_full(db_class, tmpdir):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_SQL_db_get_message_records_descending(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -696,7 +713,7 @@ async def test_SQL_db_get_message_records_descending(db_class, tmpdir):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_SQL_db_get_message_records_paging(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -767,7 +784,7 @@ async def test_SQL_db_get_message_records_paging(db_class, tmpdir):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_SQL_db_get_message_records_time_range(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -837,7 +854,7 @@ async def test_SQL_db_get_message_records_time_range(db_class, tmpdir):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db,))
 async def test_SQL_db_count_message_records_rare(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -873,7 +890,7 @@ async def test_SQL_db_count_message_records_rare(db_class, tmpdir):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_SQL_db_count_message_records_public(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -914,7 +931,7 @@ async def test_SQL_db_count_message_records_public(db_class, tmpdir):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_SQL_db_count_message_records_full(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -949,7 +966,7 @@ async def test_SQL_db_count_message_records_full(db_class, tmpdir):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_SQL_db_count_message_records_time_range(db_class, tmpdir):
-	with temp_postgres(tmpdir) as db_conf:
+	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
 		await db.connect()
 		await db.make_schema()
@@ -1335,8 +1352,97 @@ async def test_SQL_db_get_messages_not_fully_text_indexed(tmpdir):
 		r, n, p = await db.get_messages_not_fully_text_indexed(end_time=360)
 		assert len(r) == 1
 		assert r[0].uuid == u2
-		
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
+async def test_db_mark_message_retracted(tmpdir, hopauth_mock, db_class):
+	with ctx_for_db[db_class](tmpdir) as db_conf:
+		db = db_class(db_conf)
+		await db.connect()
+		await db.make_schema()
+		
+		u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
+		message = b"datadatadata"
+		metadata = Metadata(topic="t1", partition=0, offset=51, timestamp=27, key="", headers=[("_id",u.bytes)], _raw=None)
+		with decision_api.Decider(decider_test_config) as decider:
+			annotations = decider.get_annotations(message, metadata)
+			annotations["size"] = 256 # dummy value, doesn't matter
+			annotations["key"] = "dummy" # dummy value, doesn't matter
+			annotations["bucket"] = "dummy" # dummy value, doesn't matter
+			annotations["crc32"] = 17 # dummy value, doesn't matter
+		
+		await db.insert(metadata, annotations)
+		result = await db.fetch(annotations['con_text_uuid'])
+		assert not result.retracted, "Newly stored messages cannot be retracted"
+		
+		await db.mark_message_retracted(annotations['con_text_uuid'])
+		result = await db.fetch(annotations['con_text_uuid'])
+		assert result.retracted, "Message retraction flag should be set after retraction"
+		
+		await db.mark_message_retracted(annotations['con_text_uuid'], False)
+		result = await db.fetch(annotations['con_text_uuid'])
+		assert not result.retracted, "Message retraction flag should not be set after un-retraction"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
+async def test_db_get_message_records_retracted(db_class, tmpdir):
+	with ctx_for_db[db_class](tmpdir) as db_conf:
+		db = db_class(db_conf)
+		await db.connect()
+		await db.make_schema()
+
+		p1, m1, a1 = generate_message(b"alert", topic="t1", timestamp=47, public=True)
+		await db.insert(m1, a1)
+		p2, m2, a2 = generate_message(b"another alert", topic="t1", timestamp=49, public=True)
+		await db.insert(m2, a2)
+		
+		p3, m3, a3 = generate_message(b"secret", topic="t2", timestamp=22, public=False)
+		await db.insert(m3, a3)
+		p4, m4, a4 = generate_message(b"shared", topic="t2", timestamp=81, public=True)
+		await db.insert(m4, a4)
+		
+		p5, m5, a5 = generate_message(b"private", topic="t3", timestamp=35, public=False)
+		await db.insert(m5, a5)
+		p4, m6, a6 = generate_message(b"proprietary", topic="t3", timestamp=48, public=False)
+		await db.insert(m6, a6)
+		
+		await db.mark_message_retracted(a3['con_text_uuid'])
+		
+		results, n, p = await db.get_message_records(topics_full=["t2", "t3"], ascending=True)
+		assert len(results) == 4
+		assert results[0].timestamp == 22
+		assert not results[0].public
+		assert results[0].retracted
+		assert results[0].topic == "t2"
+		assert results[1].timestamp == 35
+		assert not results[1].public
+		assert not results[1].retracted
+		assert results[1].topic == "t3"
+		assert results[2].timestamp == 48
+		assert not results[2].public
+		assert not results[2].retracted
+		assert results[2].topic == "t3"
+		assert results[3].timestamp == 81
+		assert results[3].public
+		assert not results[3].retracted
+		assert results[3].topic == "t2"
+		
+		results, n, p = await db.get_message_records(topics_full=["t2", "t3"], ascending=True,
+		                                             include_retracted=False)
+		assert len(results) == 3
+		assert results[0].timestamp == 35
+		assert not results[0].public
+		assert not results[0].retracted
+		assert results[0].topic == "t3"
+		assert results[1].timestamp == 48
+		assert not results[1].public
+		assert not results[1].retracted
+		assert results[1].topic == "t3"
+		assert results[2].timestamp == 81
+		assert results[2].public
+		assert not results[2].retracted
+		assert results[2].topic == "t2"
+		
 # These tests test test code, which is a bit pointless, but keeps it from cluttering up the coverage
 # reports as being un-covered
 
@@ -1379,6 +1485,9 @@ async def test_Base_db_unimlemented():
 	
 	with pytest.raises(NotImplementedError):
 		await db.count_message_records()
+	
+	with pytest.raises(NotImplementedError):
+		await db.mark_message_retracted("dummy", True)
 
 @pytest.mark.asyncio
 async def test_Mock_db_get_message_id(hopauth_mock):

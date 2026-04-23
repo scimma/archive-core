@@ -7,7 +7,7 @@ import uuid
 from archive import access_api
 from archive import store_api
 
-from conftest import hopauth_mock, temp_environ
+from conftest import hopauth_mock, temp_environ, temp_postgres
 
 pytest_plugins = ('pytest_asyncio',)
 
@@ -346,3 +346,56 @@ async def test_archive_access_get_object_summary(hopauth_mock):
     
     not_found = await aa.get_object_summary("some invalid key")
     assert not not_found["exists"]
+
+@pytest.mark.asyncio
+async def test_archive_access_text_search(tmpdir, hopauth_mock):
+    with temp_postgres(tmpdir) as db_conf:
+        conf = get_mock_config()
+        conf.update(db_conf)
+        aa = access_api.Archive_access(conf)
+        await aa.connect()
+        await aa.db.make_schema()
+    
+        u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
+        message = b"foo bar baz quux corge grault"
+        metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
+        r = await aa.store_message(message, metadata)
+        
+        r = await aa.search_message_text("baz")
+        print(r)
+        assert len(r[0]) == 1
+        assert r[0][0].uuid == u
+        c = await aa.count_text_search_results("baz")
+        assert c == 1
+        
+        r = await aa.search_message_text("grault")
+        assert len(r[0]) == 1
+        assert r[0][0].uuid == u
+        c = await aa.count_text_search_results("grault")
+        assert c == 1
+        
+        r = await aa.search_message_text("xyzzy")
+        assert len(r[0]) == 0
+        c = await aa.count_text_search_results("xyzzy")
+        assert c == 0
+
+@pytest.mark.asyncio
+async def test_archive_access_mark_message_retracted(hopauth_mock):
+    aa = access_api.Archive_access(get_mock_config())
+    await aa.connect()
+    
+    u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
+    message = b"datadatadata"
+    metadata = Metadata(topic="t1", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
+    r = await aa.store_message(message, metadata)
+    
+    r = await aa.get_metadata(str(u))
+    assert not r.retracted
+    
+    await aa.mark_message_retracted(str(u))
+    r = await aa.get_metadata(str(u))
+    assert r.retracted
+    
+    await aa.mark_message_retracted(str(u), False)
+    r = await aa.get_metadata(str(u))
+    assert not r.retracted

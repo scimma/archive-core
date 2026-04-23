@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS originator text DEFAULT '' NOT NULL;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS retracted boolean DEFAULT false NOT NULL;
+
+COMMIT;

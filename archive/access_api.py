@@ -162,3 +162,6 @@ class Archive_access():
     
     async def count_text_search_results(self, *args, **kwargs):
         return await self.db.count_text_search_results(*args, **kwargs)
+
+    async def mark_message_retracted(self, msg_id, retracted: bool=True):
+        return await self.db.mark_message_retracted(msg_id, retracted)

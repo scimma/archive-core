@@ -182,6 +182,7 @@ class Decider:
 		annotations["title"] = self.get_string_header(metadata.headers, "title")
 		annotations["sender"] = self.get_string_header(metadata.headers, "_sender")
 		annotations["file_name"] = self.get_string_header(metadata.headers, "file_name")
+		annotations["originator"] = self.get_string_header(metadata.headers, "originator")
 		return annotations
 	
 	

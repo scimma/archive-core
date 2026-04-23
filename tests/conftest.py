@@ -306,6 +306,7 @@ def temp_postgres(tmpdir):
 	try:
 		with temp_environ(DB_PASSWORD=""):
 			yield {
+				"db_type": "sql",
 				"db_host": ps.info.host,
 				"db_port": ps.info.port,
 				"db_name": ps.info.dbname,

@@ -111,6 +111,8 @@ class Base_db:
         sender: str
         media_type: str
         file_name: str
+        originator: str
+        retracted: bool
 
     async def fetch(self, uuid) -> MessageRecord:
         raise NotImplementedError
@@ -180,7 +182,8 @@ class Base_db:
                                   topics_public: Optional[List[str]]=None,
                                   topics_full: Optional[List[str]]=None,
                                   start_time: Optional[int]=None,
-                                  end_time: Optional[int]=None,):
+                                  end_time: Optional[int]=None,
+                                  include_retracted=True):
         """
         Get the records for messages satisfying specified criteria, with results split/batched into
         'pages'.
@@ -204,6 +207,7 @@ class Base_db:
             start_time: The beginning of the message timestamp range to select.
             end_time: The end of the message timestamp range to select. The range is half-open, so
                       messages with this exact timestamp will be excluded.
+            include_retracted: Whether retracted messages should be included in results
         Return: A tuple consisting of the results (a list of MessageRecords), a 'bookmark' which can
                 be used to fetch the next page of results or None if there are no subsequent
                 results, and a 'bookmark' for the previous page of results or None if there are no
@@ -215,7 +219,8 @@ class Base_db:
                                     topics_public: Optional[List[str]]=None,
                                     topics_full: Optional[List[str]]=None,
                                     start_time: Optional[int]=None,
-                                    end_time: Optional[int]=None,):
+                                    end_time: Optional[int]=None,
+                                    include_retracted=True):
         """
         Count the numberof messages satisfying specified criteria, as they would be returned by
         get_message_records.
@@ -229,8 +234,12 @@ class Base_db:
             start_time: The beginning of the message timestamp range to select.
             end_time: The end of the message timestamp range to select. The range is half-open, so
                       messages with this exact timestamp will be excluded.
+            include_retracted: Whether retracted messages should be included in results
         Return: An integer count of messages
         """
+        raise NotImplementedError
+
+    async def mark_message_retracted(self, msg_id, retracted: bool=True):
         raise NotImplementedError
 
 
@@ -274,6 +283,8 @@ class Mock_db(Base_db):
                   sender = annotations['sender'],
                   media_type = annotations['media_type'],
                   file_name = annotations['file_name'],
+                  originator = annotations.get("originator", ""),
+                  retracted = False,
                   )
         self.data[value.id] = value
         self.next_id += 1
@@ -344,7 +355,8 @@ class Mock_db(Base_db):
                                topics_public: Optional[List[str]]=None,
                                topics_full: Optional[List[str]]=None,
                                start_time: Optional[int]=None,
-                               end_time: Optional[int]=None):
+                               end_time: Optional[int]=None,
+                               include_retracted=True):
         def filter(record):
             if topics_public is not None or topics_full is not None:
                 if topics_public is None:
@@ -362,6 +374,8 @@ class Mock_db(Base_db):
                 return False
             if end_time is not None and record.timestamp >= end_time:
                 return False
+            if not include_retracted and record.retracted:
+                return False
             return True
         return filter
 
@@ -370,9 +384,11 @@ class Mock_db(Base_db):
                                   topics_public: Optional[List[str]]=None,
                                   topics_full: Optional[List[str]]=None,
                                   start_time: Optional[int]=None,
-                                  end_time: Optional[int]=None,):
+                                  end_time: Optional[int]=None,
+                                  include_retracted=True):
         assert self.connected
-        filter = self._generate_query_filter(topics_public, topics_full, start_time, end_time)
+        filter = self._generate_query_filter(topics_public, topics_full, start_time, end_time,
+                                             include_retracted)
         # This is not at all efficient, but should not be used for serious amounts of data
         matching = [r for r in self.data.values() if filter(r)]
         if len(matching) == 0:
@@ -427,15 +443,23 @@ class Mock_db(Base_db):
                                     topics_public: Optional[List[str]]=None,
                                     topics_full: Optional[List[str]]=None,
                                     start_time: Optional[int]=None,
-                                    end_time: Optional[int]=None,):
+                                    end_time: Optional[int]=None,
+                                    include_retracted=True):
         assert self.connected
-        filter = self._generate_query_filter(topics_public, topics_full, start_time, end_time)
+        filter = self._generate_query_filter(topics_public, topics_full, start_time, end_time,
+                                             include_retracted)
         # This is not at all efficient, but should not be used for serious amounts of data
         count = 0
         for record in self.data.values():
             if filter(record):
                 count += 1
         return count
+
+    async def mark_message_retracted(self, msg_id, retracted: bool=True):
+        assert self.connected
+        for id, record in self.data.items():
+            if record.uuid == msg_id:
+                record.retracted = retracted
 
 class SQL_db(Base_db):
     def __init__(self, config):
@@ -482,6 +506,8 @@ class SQL_db(Base_db):
             Column("sender", sqlalchemy.dialects.postgresql.TEXT, nullable=False, default=""),
             Column("media_type", sqlalchemy.dialects.postgresql.TEXT, nullable=False, default=""),
             Column("file_name", sqlalchemy.dialects.postgresql.TEXT, nullable=False, default=""),
+            Column("originator", sqlalchemy.dialects.postgresql.TEXT, nullable=False, default=""),
+            Column("retracted", sqlalchemy.dialects.postgresql.BOOLEAN, nullable=False, default=False),
         )
         self.ts_table = sqlalchemy.Table(
             "message_ts",
@@ -540,6 +566,8 @@ class SQL_db(Base_db):
                     sender = annotations['sender'],
                     media_type = annotations['media_type'],
                     file_name = annotations['file_name'],
+                    originator = annotations.get("originator", ""),
+                    retracted = False,
                 )
             )
             if text_to_index is not None:
@@ -705,7 +733,8 @@ class SQL_db(Base_db):
                                      topics_public: Optional[List[str]]=None,
                                      topics_full: Optional[List[str]]=None,
                                      start_time: Optional[int]=None,
-                                     end_time: Optional[int]=None):
+                                     end_time: Optional[int]=None,
+                                     include_retracted=True):
         if topics_public is not None or topics_full is not None:
             if topics_public is not None and len(topics_public) > 0:
                 if len(topics_public) == 1:
@@ -735,6 +764,8 @@ class SQL_db(Base_db):
             q = q.where(self.messages_table.c.timestamp >= start_time)
         if end_time is not None:
             q = q.where(self.messages_table.c.timestamp < end_time)
+        if not include_retracted:
+            q = q.where(self.messages_table.c.retracted == False)
         return q
 
     async def get_message_records(self, bookmark: Optional[str]=None, page_size: int=1024,
@@ -742,7 +773,8 @@ class SQL_db(Base_db):
                                   topics_public: Optional[List[str]]=None,
                                   topics_full: Optional[List[str]]=None,
                                   start_time: Optional[int]=None,
-                                  end_time: Optional[int]=None,):
+                                  end_time: Optional[int]=None,
+                                  include_retracted=True):
         all_topics = (topics_public or []) + (topics_full or [])
         primary_order_key = self.messages_table.c.timestamp
         time_hint = None
@@ -785,7 +817,8 @@ class SQL_db(Base_db):
         else:
             q = q.order_by(sqlalchemy.desc(primary_order_key),
                            sqlalchemy.desc(self.messages_table.c.id))
-        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
+        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time,
+                                              include_retracted)
         if time_hint is not None:
             q = q.where(time_hint)
         async with AsyncSession(self.engine) as session:
@@ -797,9 +830,11 @@ class SQL_db(Base_db):
     async def count_message_records(self, topics_public: Optional[List[str]]=None,
                                     topics_full: Optional[List[str]]=None,
                                     start_time: Optional[int]=None,
-                                    end_time: Optional[int]=None,):
+                                    end_time: Optional[int]=None,
+                                    include_retracted=True):
         q = sqlalchemy.select(sqlalchemy.func.count()).select_from(self.messages_table)
-        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
+        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time,
+                                              include_retracted)
         async with AsyncSession(self.engine) as session:
             count = (await session.execute(q)).scalar()
         return count
@@ -810,11 +845,13 @@ class SQL_db(Base_db):
                                   topics_public: Optional[List[str]]=None,
                                   topics_full: Optional[List[str]]=None,
                                   start_time: Optional[int]=None,
-                                  end_time: Optional[int]=None,):
+                                  end_time: Optional[int]=None,
+                                  include_retracted=True):
         j = sqlalchemy.join(self.messages_table, self.ts_table,
                             self.messages_table.c.uuid == self.ts_table.c.uuid)
         q = self.messages_table.select().select_from(j).where(self.ts_table.c.text_data.op("@@")(sqlalchemy.func.websearch_to_tsquery(query)))
-        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
+        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time,
+                                              include_retracted)
         if ascending:
             q = q.order_by(self.messages_table.c.timestamp, self.messages_table.c.id)
         else:
@@ -830,11 +867,13 @@ class SQL_db(Base_db):
                                         topics_public: Optional[List[str]]=None,
                                         topics_full: Optional[List[str]]=None,
                                         start_time: Optional[int]=None,
-                                        end_time: Optional[int]=None,):
+                                        end_time: Optional[int]=None,
+                                        include_retracted=True):
         j = sqlalchemy.join(self.messages_table, self.ts_table,
                             self.messages_table.c.uuid == self.ts_table.c.uuid)
         q = sqlalchemy.select(sqlalchemy.func.count()).select_from(j).where(self.ts_table.c.text_data.op("@@")(sqlalchemy.func.websearch_to_tsquery(query)))
-        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time)
+        q = self._generate_query_restrictions(q, topics_public, topics_full, start_time, end_time,
+                                              include_retracted)
         async with AsyncSession(self.engine) as session:
             count = (await session.execute(q)).scalar()
         return count
@@ -872,6 +911,13 @@ class SQL_db(Base_db):
         return ([Base_db.MessageRecord(*r) for r in page],
                 page.paging.bookmark_next if page.paging.has_next else None,
                 page.paging.bookmark_previous if page.paging.has_previous else None,)
+
+    async def mark_message_retracted(self, msg_id, retracted: bool=True):
+        async with self.engine.connect() as conn:
+            stmt = sqlalchemy.update(self.messages_table).values(retracted = retracted) \
+                   .where(self.messages_table.c.uuid == msg_id)
+            result = await conn.execute(stmt)
+            await conn.commit()
 
 
 class AWS_db(SQL_db):
