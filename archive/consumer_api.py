@@ -35,11 +35,11 @@ from hop.io import Stream, StartPosition, list_topics
 from hop import http_scram
 from . import utility_api
 
-def ConsumerFactory(config):
+def ConsumerFactory(config, liveness_callback=None):
     type = config["consumer_type"]
     #instantiate, then return consumer object of correct type.
-    if type == "mock" : return Mock_consumer(config)
-    if type == "hop"  : return Hop_consumer (config)
+    if type == "mock" : return Mock_consumer(config, liveness_callback)
+    if type == "hop"  : return Hop_consumer (config, liveness_callback)
     raise RuntimeError(f"consumer {type} not supported")
 
 
@@ -85,8 +85,8 @@ def add_parser_options(parser):
 class Base_consumer:
     "base class for common methods"
 
-    def __init__(self, config):
-        pass
+    def __init__(self, config, periodic_callback=None):
+        self.periodic_callback = periodic_callback
     
     def connect(self):
         pass
@@ -105,13 +105,15 @@ class Base_consumer:
 
 
 class Mock_consumer(Base_consumer):
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, periodic_callback=None):
+        super().__init__(config, periodic_callback)
         self.messages = []
 
     def get_next(self):
         for message in self.messages:
             yield message
+            if self.periodic_callback is not None:
+                self.periodic_callback()
 
     def queue(self, message: bytes, metadata):
         self.messages.append((message, metadata))
@@ -133,8 +135,8 @@ class Hop_consumer(Base_consumer):
     specifed in the configuration file.
 
     """
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, periodic_callback=None):
+        super().__init__(config, periodic_callback)
         self.groupname        = config["kafka_groupname"]
         self.until_eos        = config.get("kafka_until_eos", False)
         
@@ -180,6 +182,8 @@ class Hop_consumer(Base_consumer):
         interval = time.time() - self.last_last_refresh_time
         if self.refresh_interval > interval:
             return False
+        if self.periodic_callback is not None:
+            self.periodic_callback()
 
         # interval exceeded -- reset time, and refresh topic list
         self.last_last_refresh_time = time.time()
