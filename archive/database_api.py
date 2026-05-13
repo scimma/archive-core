@@ -787,15 +787,18 @@ class SQL_db(Base_db):
             cq = tq.where(self.topic_table.c.topic.in_(all_topics))
             async with self.engine.connect() as conn:
                 r = await conn.execute(sqlalchemy.union_all(cq,tq))
-                # order of union results is not gauranteed, but if one value is smaller, it must
+                counts = [row[0] for row in r.all()]
+                if counts[0] is None or counts[1] is None:
+                    return ([], None, None)
+                # order of union results is not guaranteed, but if one value is smaller, it must
                 # be the subset count, and the larger the total. 
-                c, t = sorted([row[0] for row in r.all()])
+                c, t = sorted(counts)
             logging.debug(f"Count of messages on target topics is {c}, fraction is {c/t}")
             if c/t < 0.002:
                 # This seemingly-pointless addition is to try to suppress use of the main,
                 # time-ordered index when searching for messages on sparse topics.
                 # The disadvantage of suppressing use of the time-ordered index is the need to
-                # collect andsort potentially many candidate result rows.
+                # collect and sort potentially many candidate result rows.
                 primary_order_key = primary_order_key + 0
             elif bookmark is None and start_time is None and end_time is None:
                 # if attempting to find the first page (in either order) with no time restrictions,
