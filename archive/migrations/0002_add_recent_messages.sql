@@ -48,8 +48,20 @@ BEGIN
     
     -- If no row was updated, insert a new one
     IF NOT FOUND THEN
-      INSERT INTO topics (topic, e_timestamp, l_timestamp, n_messages)
-      VALUES (NEW.topic, NEW.timestamp, NEW.timestamp, 1);
+      BEGIN
+        INSERT INTO topics (topic, e_timestamp, l_timestamp, n_messages)
+        VALUES (NEW.topic, NEW.timestamp, NEW.timestamp, 1);
+      EXCEPTION
+        WHEN unique_violation THEN
+          -- This can happen if this transaction was racing another to create the row for this
+          -- topic, but lost the race. In that case, we try again to just update the row, since it
+          -- now exists.
+          UPDATE topics
+          SET e_timestamp = LEAST(e_timestamp, NEW.timestamp), 
+              l_timestamp = GREATEST(l_timestamp, NEW.timestamp), 
+              n_messages = n_messages + 1
+        WHERE topic = NEW.topic;
+      END;
     END IF;
     -- RAISE NOTICE 'Inserted topic: %, timestamp: %', NEW.topic, NEW.timestamp;
   ELSIF TG_OP = 'DELETE' THEN
