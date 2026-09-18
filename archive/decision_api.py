@@ -144,7 +144,7 @@ class Decider:
 			for header in headers:
 				if header[0] == "_format":
 					logging.debug(f" Found hop format header: {header[1]}")
-					candidate = self.hop_format_to_media_type(header[1])
+					candidate = self.hop_format_to_media_type(bytes(header[1]))
 					if candidate is not None:
 						format = candidate
 						logging.debug(f" tentative format is {format}")
