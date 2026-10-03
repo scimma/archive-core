@@ -165,3 +165,16 @@ class Archive_access():
 
     async def mark_message_retracted(self, msg_id, retracted: bool=True):
         return await self.db.mark_message_retracted(msg_id, retracted)
+
+    async def record_doi(self, doi, record_url, title, created_by, message_uuids):
+        """
+        Record a newly minted DOI and the messages it covers.
+        """
+        return await self.db.insert_doi(doi, record_url, title, created_by, message_uuids)
+
+    async def find_dois_for_messages(self, message_uuids):
+        """
+        Find every existing DOI associated with any of the given message UUIDs.
+        See database_api.SQL_db.find_dois_for_messages for the return shape.
+        """
+        return await self.db.find_dois_for_messages(message_uuids)

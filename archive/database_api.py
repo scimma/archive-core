@@ -524,6 +524,22 @@ class SQL_db(Base_db):
             Column("l_timestamp", sqlalchemy.dialects.postgresql.BIGINT, nullable=False),
             Column("n_messages", sqlalchemy.dialects.postgresql.BIGINT, nullable=False),
         )
+        self.dois_table = sqlalchemy.Table(
+            "dois",
+            self.db_meta,
+            Column("id", sqlalchemy.dialects.postgresql.BIGINT, primary_key=True),
+            Column("doi", sqlalchemy.dialects.postgresql.TEXT, nullable=False),
+            Column("record_url", sqlalchemy.dialects.postgresql.TEXT),
+            Column("title", sqlalchemy.dialects.postgresql.TEXT),
+            Column("created_by", sqlalchemy.dialects.postgresql.TEXT),
+            Column("created_at", sqlalchemy.dialects.postgresql.TIMESTAMP(timezone=True)),
+        )
+        self.doi_messages_table = sqlalchemy.Table(
+            "doi_messages",
+            self.db_meta,
+            Column("doi_id", sqlalchemy.dialects.postgresql.BIGINT, nullable=False),
+            Column("message_uuid", sqlalchemy.dialects.postgresql.UUID, nullable=False),
+        )
 
     async def close(self):
         await self.engine.dispose()
@@ -921,6 +937,78 @@ class SQL_db(Base_db):
                    .where(self.messages_table.c.uuid == msg_id)
             result = await conn.execute(stmt)
             await conn.commit()
+
+    async def insert_doi(self, doi, record_url, title, created_by, message_uuids):
+        """
+        Record a newly minted DOI and the set of messages it covers.
+
+        Returns: the new row's id in the dois table.
+        """
+        if self.read_only:
+            raise RuntimeError("This database object is set to read-only; insert_doi is forbidden")
+
+        async with self.engine.connect() as conn:
+            result = await conn.execute(
+                self.dois_table.insert().values(
+                    doi = doi,
+                    record_url = record_url,
+                    title = title,
+                    created_by = created_by,
+                ).returning(self.dois_table.c.id)
+            )
+            doi_id = result.scalar()
+
+            await conn.execute(
+                self.doi_messages_table.insert(),
+                [{"doi_id": doi_id, "message_uuid": message_uuid} for message_uuid in message_uuids]
+            )
+            await conn.commit()
+        return doi_id
+
+    async def find_dois_for_messages(self, message_uuids):
+        """
+        Find every existing DOI associated with any of the given message
+        UUIDs.
+
+        Returns: A sequence of rows, one per (doi, message_uuid) pairing,
+                each including the DOI's id, doi string, record_url, and
+                title, plus the specific message_uuid matched. The caller
+                is responsible for grouping these by doi_id to reconstruct
+                each DOI's full associated message set.
+        """
+        async with self.engine.connect() as conn:
+            # First, find every doi_id that has ANY overlap with the given uuids.
+            overlapping_doi_ids_result = await conn.execute(
+                sqlalchemy.select(self.doi_messages_table.c.doi_id)
+                    .distinct()
+                    .where(self.doi_messages_table.c.message_uuid.in_(bindparam("uuids")))
+                , {"uuids": message_uuids}
+            )
+            overlapping_doi_ids = [row[0] for row in overlapping_doi_ids_result.all()]
+            if not overlapping_doi_ids:
+                return []
+ 
+            # Then, for each of those DOIs, fetch their FULL message set (not
+            # just the overlapping ones) so the caller can determine whether
+            # a candidate set is an exact match or only a partial overlap.
+            result = await conn.execute(
+                sqlalchemy.select(
+                    self.dois_table.c.id,
+                    self.dois_table.c.doi,
+                    self.dois_table.c.record_url,
+                    self.dois_table.c.title,
+                    self.doi_messages_table.c.message_uuid,
+                )
+                .select_from(
+                    self.dois_table.join(
+                        self.doi_messages_table,
+                        self.dois_table.c.id == self.doi_messages_table.c.doi_id
+                    )
+                )
+                .where(self.dois_table.c.id.in_(bindparam("doi_ids")))
+                , {"doi_ids": overlapping_doi_ids}
+            )
+            return result.all()
 
 
 class AWS_db(SQL_db):
