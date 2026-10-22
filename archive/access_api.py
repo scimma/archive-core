@@ -6,21 +6,25 @@ users. and as a shim for trusted co-developers.
 
 """
 import bson
+import json
 import logging
 from typing import Optional, List
+from . import bson_stream
 from . import database_api
 from . import decision_api
 from . import store_api
 from . import utility_api
+from . import zenodo_client
 
 ###########
-# storage 
+# storage
 ###########
 
 def add_parser_options(parser):
     database_api.add_parser_options(parser)
     decision_api.add_parser_options(parser)
     store_api.add_parser_options(parser)
+    zenodo_client.add_parser_options(parser)
     parser.add_argument("--read-only", help="Set whether only read operations are permitted",
                         type=bool, action=utility_api.EnvDefault, envvar="READ_ONLY",
                         required=False, default=False)
@@ -48,17 +52,27 @@ class Archive_access():
         await self.db.close()
         await self.store.close()
         pass
-    
+
     async def get_metadata(self, uuid):
         "get metadata, if any associated with a message with the given ID"
         return await self.db.fetch(uuid)
-    
+
     async def get_object_lazily(self, key):
         """
         get the raw object in the form of the S3 response which can be streamed
         """
         return await self.store.get_object_lazily(key)
-    
+
+    async def get_file_stream(self, key):
+        """
+        Stream just the raw bytes of a message's file attachment (if any),
+        extracted from the larger stored BSON bundle, without buffering the
+        whole thing in memory. Yields bytes chunks.
+        """
+        s3_result = await self.get_object_lazily(key)
+        async for chunk in bson_stream.extract_binary_field(s3_result, field_name="message"):
+            yield chunk
+
     async def get_raw_object(self, key):
         "get the raw object -- bson bundle"
         bundle = await self.store.get_object(key)
@@ -159,7 +173,7 @@ class Archive_access():
     
     async def search_message_text(self, *args, **kwargs):
         return await self.db.search_message_text(*args, **kwargs)
-    
+
     async def count_text_search_results(self, *args, **kwargs):
         return await self.db.count_text_search_results(*args, **kwargs)
 
@@ -178,3 +192,48 @@ class Archive_access():
         See database_api.SQL_db.find_dois_for_messages for the return shape.
         """
         return await self.db.find_dois_for_messages(message_uuids)
+
+    async def mint_doi(self, config, zenodo_metadata, message_uuids, created_by):
+        """
+        Mint a Zenodo DOI covering the given messages, and record it, all in
+        one call - avoiding the inconsistent-state risk of minting and
+        recording as two separate, independently-failable operations.
+
+        For each message, this uses the message's OWN raw stored form
+        (via get_as_sent) if it has no file attachment, or the raw file
+        bytes themselves (via get_file_stream, streamed directly to
+        Zenodo) if it does - never a display-oriented reshaping of the data.
+
+        Raises zenodo_client.ZenodoNotConfiguredError if this archive
+        instance has no Zenodo configuration - callers should treat that as
+        a clean "feature not available here", not an internal error.
+
+        Returns the published Zenodo deposition dict (includes 'doi' and
+        'links'['record_html']).
+        """
+        files = []
+        for message_uuid in message_uuids:
+            record = await self.get_metadata(message_uuid)
+            if record is None:
+                raise ValueError(f"No such message: {message_uuid}")
+
+            if record.file_name:
+                content = self.get_file_stream(record.key)
+                files.append((record.file_name, content))
+            else:
+                message, headers = await self.get_as_sent(record.key)
+                payload = json.dumps({"message": message, "headers": headers},
+                                      indent=2, default=str).encode("utf-8")
+                files.append((f"{message_uuid}.json", payload))
+
+        published = await zenodo_client.mint_doi_for_package(config, zenodo_metadata, files)
+
+        await self.record_doi(
+            doi=published["doi"],
+            record_url=published["links"]["record_html"],
+            title=zenodo_metadata["title"],
+            created_by=created_by,
+            message_uuids=message_uuids,
+        )
+
+        return published
