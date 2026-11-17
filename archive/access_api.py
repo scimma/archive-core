@@ -1,7 +1,7 @@
 """
 softare supporting API access to a scimma data store.
 
-This is a small library meant for AWS-enabled turused internal
+This is a small library meant for AWS-enabled trusted internal
 users. and as a shim for trusted co-developers.
 
 """
@@ -140,10 +140,10 @@ class Archive_access():
                        can be retrieved as subsequent 'pages'.
             ascending: Whether the reuslts should be sorted in ascending timestamp order.
             topics_public: If not None, only messages which are flagged as being public appearing on
-                        these topics will be returned. Can be used at the same time as
-                        topics_full.
+                           these topics will be returned. Can be used at the same time as
+                           topics_full.
             topics_full: If not None, any message appearing on one of these topics is a cadidate to
-                        be returned.
+                         be returned.
             start_time: The beginning of the message timestamp range to select.
             end_time: The end of the message timestamp range to select. The range is half-open, so
                       messages with this exact timestamp will be excluded.
@@ -161,10 +161,10 @@ class Archive_access():
         
         Args:
             topics_public: If not None, only messages which are flagged as being public appearing on
-                        these topics will be returned. Can be used at the same time as
-                        topics_full.
+                           these topics will be returned. Can be used at the same time as
+                           topics_full.
             topics_full: If not None, any message appearing on one of these topics is a cadidate to
-                        be returned.
+                         be returned.
             start_time: The beginning of the message timestamp range to select.
             end_time: The end of the message timestamp range to select. The range is half-open, so
                       messages with this exact timestamp will be excluded.
