@@ -14,6 +14,7 @@ pytest_plugins = ('pytest_asyncio',)
 pytestmark = [
 	pytest.mark.mock_topic_metadata(200, [
 		{"name": "t1", "archivable": True, "index_archived_text": True, "publicly_readable": True},
+		{"name": "t2", "archivable": True, "index_archived_text": True, "publicly_readable": False},
 		]),
 ]
 
@@ -378,6 +379,23 @@ async def test_archive_access_text_search(tmpdir, hopauth_mock):
         assert len(r[0]) == 0
         c = await aa.count_text_search_results("xyzzy")
         assert c == 0
+
+@pytest.mark.asyncio
+async def test_archive_access_make_message_public(hopauth_mock):
+    aa = access_api.Archive_access(get_mock_config())
+    await aa.connect()
+    
+    u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
+    message = b"datadatadata"
+    metadata = Metadata(topic="t2", partition=0, offset=2, timestamp=356, key="", headers=[("_id",u.bytes)], _raw=None)
+    r = await aa.store_message(message, metadata)
+    
+    r = await aa.get_metadata(str(u))
+    assert not r.public
+    
+    await aa.make_message_public(str(u))
+    r = await aa.get_metadata(str(u))
+    assert r.public
 
 @pytest.mark.asyncio
 async def test_archive_access_mark_message_retracted(hopauth_mock):

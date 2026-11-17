@@ -1355,6 +1355,39 @@ async def test_SQL_db_get_messages_not_fully_text_indexed(tmpdir):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
+async def test_db_make_message_public(tmpdir, hopauth_mock, db_class):
+	with ctx_for_db[db_class](tmpdir) as db_conf:
+		db = db_class(db_conf)
+		await db.connect()
+		await db.make_schema()
+		
+		u = uuid.UUID("01234567-aaaa-bbbb-cccc-0123456789de")
+		message = b"datadatadata"
+		metadata = Metadata(topic="t1", partition=0, offset=51, timestamp=27, key="", headers=[("_id",u.bytes)], _raw=None)
+		with decision_api.Decider(decider_test_config) as decider:
+			annotations = decider.get_annotations(message, metadata)
+			annotations["size"] = 256 # dummy value, doesn't matter
+			annotations["key"] = "dummy" # dummy value, doesn't matter
+			annotations["bucket"] = "dummy" # dummy value, doesn't matter
+			annotations["crc32"] = 17 # dummy value, doesn't matter
+			annotations["public"] = False
+		
+		await db.insert(metadata, annotations)
+		result = await db.fetch(annotations['con_text_uuid'])
+		assert not result.public, "Message should initially be private"
+		
+		await db.make_message_public(annotations['con_text_uuid'])
+		
+		result = await db.fetch(annotations['con_text_uuid'])
+		assert result.public, "Message should be made public"
+		
+		await db.make_message_public(annotations['con_text_uuid'])
+		
+		result = await db.fetch(annotations['con_text_uuid'])
+		assert result.public, "Message should still be public"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("db_class", (database_api.SQL_db, database_api.Mock_db))
 async def test_db_mark_message_retracted(tmpdir, hopauth_mock, db_class):
 	with ctx_for_db[db_class](tmpdir) as db_conf:
 		db = db_class(db_conf)
@@ -1485,6 +1518,9 @@ async def test_Base_db_unimlemented():
 	
 	with pytest.raises(NotImplementedError):
 		await db.count_message_records()
+	
+	with pytest.raises(NotImplementedError):
+		await db.make_message_public("dummy")
 	
 	with pytest.raises(NotImplementedError):
 		await db.mark_message_retracted("dummy", True)

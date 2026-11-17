@@ -239,6 +239,9 @@ class Base_db:
         """
         raise NotImplementedError
 
+    async def make_message_public(self, msg_id):
+        raise NotImplementedError
+
     async def mark_message_retracted(self, msg_id, retracted: bool=True):
         raise NotImplementedError
 
@@ -454,6 +457,12 @@ class Mock_db(Base_db):
             if filter(record):
                 count += 1
         return count
+
+    async def make_message_public(self, msg_id):
+        assert self.connected
+        for id, record in self.data.items():
+            if record.uuid == msg_id:
+                record.public = True
 
     async def mark_message_retracted(self, msg_id, retracted: bool=True):
         assert self.connected
@@ -930,6 +939,13 @@ class SQL_db(Base_db):
         return ([Base_db.MessageRecord(*r) for r in page],
                 page.paging.bookmark_next if page.paging.has_next else None,
                 page.paging.bookmark_previous if page.paging.has_previous else None,)
+
+    async def make_message_public(self, msg_id):
+        async with self.engine.connect() as conn:
+            stmt = sqlalchemy.update(self.messages_table).values(public = True) \
+                   .where(self.messages_table.c.uuid == msg_id)
+            result = await conn.execute(stmt)
+            await conn.commit()
 
     async def mark_message_retracted(self, msg_id, retracted: bool=True):
         async with self.engine.connect() as conn:
