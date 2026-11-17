@@ -1,26 +1,30 @@
 """
 softare supporting API access to a scimma data store.
 
-This is a small librare  meant for AWS-enabled turused internal
+This is a small library meant for AWS-enabled trusted internal
 users. and as a shim for trusted co-developers.
 
 """
 import bson
+import json
 import logging
 from typing import Optional, List
+from . import bson_stream
 from . import database_api
 from . import decision_api
 from . import store_api
 from . import utility_api
+from . import zenodo_client
 
 ###########
-# storage 
+# storage
 ###########
 
 def add_parser_options(parser):
     database_api.add_parser_options(parser)
     decision_api.add_parser_options(parser)
     store_api.add_parser_options(parser)
+    zenodo_client.add_parser_options(parser)
     parser.add_argument("--read-only", help="Set whether only read operations are permitted",
                         type=bool, action=utility_api.EnvDefault, envvar="READ_ONLY",
                         required=False, default=False)
@@ -34,6 +38,7 @@ class Archive_access():
         self.db     = database_api.DbFactory(config)
         self.store  = store_api.StoreFactory(config)
         self.decider = decision_api.Decider(config)
+        self.zenodo = zenodo_client.ZenodoClient(config)
         self.read_only = config.get("read_only", False)
     
     async def connect(self):
@@ -58,6 +63,16 @@ class Archive_access():
         get the raw object in the form of the S3 response which can be streamed
         """
         return await self.store.get_object_lazily(key)
+
+    async def stream_raw_message_payload(self, key):
+        """
+        Stream just the raw bytes of a message's body (payload), extracted
+        from the larger stored BSON bundle, without buffering the whole
+        thing in memory. Yields bytes chunks.
+        """
+        s3_result = await self.get_object_lazily(key)
+        async for chunk in bson_stream.stream_raw_payload(s3_result):
+            yield chunk
     
     async def get_raw_object(self, key):
         "get the raw object -- bson bundle"
@@ -122,7 +137,7 @@ class Archive_access():
             bookmark: If not None, this must be a 'bookmark' string returned by a previous call, to
                       select another page of results.
             page_size: The maximum number of results to return fro this call; any further results
-                       can be retrieved as subsequent 'pages'. 
+                       can be retrieved as subsequent 'pages'.
             ascending: Whether the reuslts should be sorted in ascending timestamp order.
             topics_public: If not None, only messages which are flagged as being public appearing on
                            these topics will be returned. Can be used at the same time as
@@ -165,3 +180,68 @@ class Archive_access():
 
     async def mark_message_retracted(self, msg_id, retracted: bool=True):
         return await self.db.mark_message_retracted(msg_id, retracted)
+
+    async def record_doi(self, doi, record_url, title, created_by, message_uuids):
+        """
+        Record a newly minted DOI and the messages it covers.
+        """
+        return await self.db.insert_doi(doi, record_url, title, created_by, message_uuids)
+
+    async def find_dois_for_messages(self, message_uuids):
+        """
+        Find every existing DOI associated with any of the given message UUIDs.
+        See database_api.SQL_db.find_dois_for_messages for the return shape.
+        """
+        return await self.db.find_dois_for_messages(message_uuids)
+
+    def doi_minting_enabled(self):
+        """
+        Whether this archive instance has the configuration needed to mint DOIs.
+        """
+        return self.zenodo.is_configured()
+
+    async def mint_doi(self, zenodo_metadata, message_uuids, created_by):
+        """
+        Mint a Zenodo DOI covering the given messages, and record it, all in
+        one call - avoiding the inconsistent-state risk of minting and
+        recording as two separate, independently-failable operations.
+
+        Each message is sent to Zenodo as a single file. If the message was
+        archived with a file name, its body is the content of a file, so the
+        raw body bytes are streamed directly to Zenodo under that name.
+        Otherwise the message's own raw stored form (via get_as_sent) is
+        serialized as JSON - never a display-oriented reshaping of the data.
+
+        Raises zenodo_client.ZenodoNotConfiguredError if this archive
+        instance has no Zenodo configuration - callers should treat that as
+        a clean "feature not available here", not an internal error.
+
+        Returns the published Zenodo deposition dict (includes 'doi' and
+        'links'['record_html']).
+        """
+        files = []
+        for message_uuid in message_uuids:
+            record = await self.get_metadata(message_uuid)
+            if record is None:
+                raise ValueError(f"No such message: {message_uuid}")
+
+            if record.file_name:
+                content = self.stream_raw_message_payload(record.key)
+                files.append((record.file_name, content))
+            else:
+                message, headers = await self.get_as_sent(record.key)
+                payload = json.dumps({"message": message, "headers": headers},
+                                      indent=2, default=str).encode("utf-8")
+                files.append((f"{message_uuid}.json", payload))
+
+        published = await self.zenodo.mint_doi_for_package(zenodo_metadata, files)
+
+        await self.record_doi(
+            doi=published["doi"],
+            record_url=published["links"]["record_html"],
+            title=zenodo_metadata["title"],
+            created_by=created_by,
+            message_uuids=message_uuids,
+        )
+
+        return published
