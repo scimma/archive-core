@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS dois (
 	record_url text,
 	title text,
 	created_by text,
-	created_at timestamptz NOT NULL DEFAULT now()
+	created_at bigint NOT NULL DEFAULT (extract(epoch FROM now()) * 1000)::bigint
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS dois_doi_idx ON dois

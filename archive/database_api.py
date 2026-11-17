@@ -532,7 +532,7 @@ class SQL_db(Base_db):
             Column("record_url", sqlalchemy.dialects.postgresql.TEXT),
             Column("title", sqlalchemy.dialects.postgresql.TEXT),
             Column("created_by", sqlalchemy.dialects.postgresql.TEXT),
-            Column("created_at", sqlalchemy.dialects.postgresql.TIMESTAMP(timezone=True)),
+            Column("created_at", sqlalchemy.dialects.postgresql.BIGINT),
         )
         self.doi_messages_table = sqlalchemy.Table(
             "doi_messages",
@@ -942,6 +942,10 @@ class SQL_db(Base_db):
         """
         Record a newly minted DOI and the set of messages it covers.
 
+        The created_at column is not set here; the database fills it in
+        automatically with the time of the insert (milliseconds since the
+        Unix epoch, like message timestamps).
+
         Returns: the new row's id in the dois table.
         """
         if self.read_only:
@@ -971,10 +975,12 @@ class SQL_db(Base_db):
         UUIDs.
 
         Returns: A sequence of rows, one per (doi, message_uuid) pairing,
-                each including the DOI's id, doi string, record_url, and
-                title, plus the specific message_uuid matched. The caller
-                is responsible for grouping these by doi_id to reconstruct
-                each DOI's full associated message set.
+                for every message in every DOI which includes at least one
+                of the specified messages. Each row includes the DOI's id,
+                doi string, record_url, and title, plus that pairing's
+                message_uuid (which need not be one of message_uuids). The
+                caller is responsible for grouping these by doi_id to
+                reconstruct each DOI's full associated message set.
         """
         async with self.engine.connect() as conn:
             # First, find every doi_id that has ANY overlap with the given uuids.
@@ -987,7 +993,7 @@ class SQL_db(Base_db):
             overlapping_doi_ids = [row[0] for row in overlapping_doi_ids_result.all()]
             if not overlapping_doi_ids:
                 return []
- 
+
             # Then, for each of those DOIs, fetch their FULL message set (not
             # just the overlapping ones) so the caller can determine whether
             # a candidate set is an exact match or only a partial overlap.

@@ -18,9 +18,9 @@ class ChunkedBody:
         return gen()
 
 
-async def collect(data: bytes, chunk_size: int, **kwargs) -> bytes:
+async def collect(data: bytes, chunk_size: int) -> bytes:
     out = b""
-    async for chunk in bson_stream.extract_binary_field({"Body": ChunkedBody(data, chunk_size)}, **kwargs):
+    async for chunk in bson_stream.stream_raw_payload({"Body": ChunkedBody(data, chunk_size)}):
         out += chunk
     return out
 
@@ -44,9 +44,9 @@ async def test_extracts_message_field_for_any_chunking(chunk_size):
 
 
 @pytest.mark.asyncio
-async def test_extracts_other_named_binary_field():
-    data = bson.dumps({"message": b"AAA", "other": b"BBB"})
-    assert await collect(data, 5, field_name="other") == b"BBB"
+async def test_ignores_other_binary_fields():
+    data = bson.dumps({"other": b"BBB", "message": b"AAA"})
+    assert await collect(data, 5) == b"AAA"
 
 
 @pytest.mark.asyncio

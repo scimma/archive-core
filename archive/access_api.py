@@ -17,7 +17,7 @@ from . import utility_api
 from . import zenodo_client
 
 ###########
-# storage
+# storage 
 ###########
 
 def add_parser_options(parser):
@@ -38,6 +38,7 @@ class Archive_access():
         self.db     = database_api.DbFactory(config)
         self.store  = store_api.StoreFactory(config)
         self.decider = decision_api.Decider(config)
+        self.zenodo = zenodo_client.ZenodoClient(config)
         self.read_only = config.get("read_only", False)
     
     async def connect(self):
@@ -52,27 +53,27 @@ class Archive_access():
         await self.db.close()
         await self.store.close()
         pass
-
+    
     async def get_metadata(self, uuid):
         "get metadata, if any associated with a message with the given ID"
         return await self.db.fetch(uuid)
-
+    
     async def get_object_lazily(self, key):
         """
         get the raw object in the form of the S3 response which can be streamed
         """
         return await self.store.get_object_lazily(key)
 
-    async def get_file_stream(self, key):
+    async def stream_raw_message_payload(self, key):
         """
-        Stream just the raw bytes of a message's file attachment (if any),
-        extracted from the larger stored BSON bundle, without buffering the
-        whole thing in memory. Yields bytes chunks.
+        Stream just the raw bytes of a message's body (payload), extracted
+        from the larger stored BSON bundle, without buffering the whole
+        thing in memory. Yields bytes chunks.
         """
         s3_result = await self.get_object_lazily(key)
-        async for chunk in bson_stream.extract_binary_field(s3_result, field_name="message"):
+        async for chunk in bson_stream.stream_raw_payload(s3_result):
             yield chunk
-
+    
     async def get_raw_object(self, key):
         "get the raw object -- bson bundle"
         bundle = await self.store.get_object(key)
@@ -173,7 +174,7 @@ class Archive_access():
     
     async def search_message_text(self, *args, **kwargs):
         return await self.db.search_message_text(*args, **kwargs)
-
+    
     async def count_text_search_results(self, *args, **kwargs):
         return await self.db.count_text_search_results(*args, **kwargs)
 
@@ -193,16 +194,23 @@ class Archive_access():
         """
         return await self.db.find_dois_for_messages(message_uuids)
 
-    async def mint_doi(self, config, zenodo_metadata, message_uuids, created_by):
+    def doi_minting_enabled(self):
+        """
+        Whether this archive instance has the configuration needed to mint DOIs.
+        """
+        return self.zenodo.is_configured()
+
+    async def mint_doi(self, zenodo_metadata, message_uuids, created_by):
         """
         Mint a Zenodo DOI covering the given messages, and record it, all in
         one call - avoiding the inconsistent-state risk of minting and
         recording as two separate, independently-failable operations.
 
-        For each message, this uses the message's OWN raw stored form
-        (via get_as_sent) if it has no file attachment, or the raw file
-        bytes themselves (via get_file_stream, streamed directly to
-        Zenodo) if it does - never a display-oriented reshaping of the data.
+        Each message is sent to Zenodo as a single file. If the message was
+        archived with a file name, its body is the content of a file, so the
+        raw body bytes are streamed directly to Zenodo under that name.
+        Otherwise the message's own raw stored form (via get_as_sent) is
+        serialized as JSON - never a display-oriented reshaping of the data.
 
         Raises zenodo_client.ZenodoNotConfiguredError if this archive
         instance has no Zenodo configuration - callers should treat that as
@@ -218,7 +226,7 @@ class Archive_access():
                 raise ValueError(f"No such message: {message_uuid}")
 
             if record.file_name:
-                content = self.get_file_stream(record.key)
+                content = self.stream_raw_message_payload(record.key)
                 files.append((record.file_name, content))
             else:
                 message, headers = await self.get_as_sent(record.key)
@@ -226,7 +234,7 @@ class Archive_access():
                                       indent=2, default=str).encode("utf-8")
                 files.append((f"{message_uuid}.json", payload))
 
-        published = await zenodo_client.mint_doi_for_package(config, zenodo_metadata, files)
+        published = await self.zenodo.mint_doi_for_package(zenodo_metadata, files)
 
         await self.record_doi(
             doi=published["doi"],

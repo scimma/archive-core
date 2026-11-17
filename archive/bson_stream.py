@@ -2,11 +2,10 @@
 Low-level streaming BSON parsing helper.
 
 Message records are stored as a single BSON-encoded bundle containing the
-message body, its headers, and (if present) its file attachment together.
-extract_binary_field() streams through such a bundle, chunk by chunk,
-without ever buffering the whole document in memory, and yields only the
-bytes of one named top-level binary field - by default "message", which is
-where a file attachment's raw bytes live when one was sent.
+message body, its headers, and its metadata together. stream_raw_payload()
+streams through such a bundle, chunk by chunk, without ever buffering the
+whole document in memory, and yields only the bytes of the message body
+(the top-level binary field "message").
 """
 import enum
 import logging
@@ -38,17 +37,15 @@ class BSONType(enum.Enum):
     max_key =     0x7F
 
 
-async def extract_binary_field(s3_result, field_name: str = "message"):
+async def stream_raw_payload(s3_result):
     """
     Stream through a BSON document (as returned by an S3-style lazy object
     fetch, i.e. a dict with an async-iterable 'Body') and yield the raw
-    bytes of the named top-level binary field, without buffering the whole
-    document in memory.
+    bytes of the message body, without buffering the whole document in
+    memory.
 
     s3_result: dict with an async-iterable 'Body' of byte chunks, as
                returned by store_api's get_object_lazily().
-    field_name: the top-level BSON field to extract (default "message",
-                where a file attachment's bytes are stored).
     """
     def anext(iterator, default=None):
         __anext__ = type(iterator).__anext__
@@ -162,7 +159,7 @@ async def extract_binary_field(s3_result, field_name: str = "message"):
                 raise ValueError("Malformed document")
 
             # If this is our blessed sub-object, extract it
-            if e_type == BSONType.binary and e_name == field_name:
+            if e_type == BSONType.binary and e_name == "message":
                 raw_dlen = await read(4)
                 dlen = decode_int32(raw_dlen)
                 # plus one byte for subtype
