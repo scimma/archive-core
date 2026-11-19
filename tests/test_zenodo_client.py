@@ -1,3 +1,6 @@
+import json
+from unittest import mock
+
 import httpx
 import pytest
 
@@ -82,3 +85,95 @@ async def test_zenodo_error_is_reported(token):
     async with fake_zenodo([], fail_publish=True) as http:
         with pytest.raises(ZenodoError, match="publish deposition failed.*nope"):
             await ZenodoClient(CONFIG, http).mint_doi_for_package(METADATA, [("a.json", b"{}")])
+
+
+def fake_secrets_manager(secret_string=None, error=None):
+    """Patch boto3 so that reading the secret returns secret_string (or raises error)."""
+    session = mock.MagicMock()
+    client = mock.MagicMock()
+    if error is not None:
+        client.get_secret_value = mock.MagicMock(side_effect=error)
+    else:
+        client.get_secret_value = mock.MagicMock(return_value={"SecretString": secret_string})
+    session.client = mock.MagicMock(return_value=client)
+    return mock.patch("boto3.session.Session", mock.MagicMock(return_value=session)), session, client
+
+
+SECRET_CONFIG = {**CONFIG, "zenodo_aws_secret_name": "zenodo-token", "zenodo_aws_secret_region": "ac-pole-1"}
+
+
+@pytest.fixture
+def no_token(monkeypatch):
+    monkeypatch.delenv("ZENODO_TOKEN", raising=False)
+
+
+def test_token_from_plain_text_secret(no_token):
+    patcher, session, client = fake_secrets_manager("  abc123\n")
+    with patcher:
+        assert ZenodoClient(SECRET_CONFIG).is_configured()
+    session.client.assert_called_with(service_name="secretsmanager", region_name="ac-pole-1")
+    client.get_secret_value.assert_called_with(SecretId="zenodo-token")
+
+
+@pytest.mark.parametrize("key", ["token", "ZENODO_TOKEN"])
+def test_token_from_json_secret(no_token, key):
+    patcher, _, _ = fake_secrets_manager(json.dumps({key: "abc123"}))
+    with patcher:
+        assert zenodo_client.token_from_secret("ac-pole-1", "zenodo-token") == "abc123"
+
+
+def test_json_secret_without_token_is_an_error(no_token):
+    patcher, _, _ = fake_secrets_manager(json.dumps({"other": "x"}))
+    with patcher, pytest.raises(ValueError):
+        zenodo_client.token_from_secret("ac-pole-1", "zenodo-token")
+
+
+def test_environment_token_takes_priority_over_secret(monkeypatch):
+    monkeypatch.setenv("ZENODO_TOKEN", "from-env")
+    patcher, session, _ = fake_secrets_manager("from-secret")
+    with patcher:
+        assert ZenodoClient(SECRET_CONFIG).is_configured()
+    session.client.assert_not_called()
+
+
+def test_constructing_never_reads_the_secret(no_token):
+    patcher, session, _ = fake_secrets_manager("abc123")
+    with patcher:
+        ZenodoClient(SECRET_CONFIG)
+    session.client.assert_not_called()
+
+
+def test_secret_is_read_once_and_kept(no_token):
+    patcher, _, client = fake_secrets_manager("abc123")
+    with patcher:
+        zenodo = ZenodoClient(SECRET_CONFIG)
+        assert zenodo.is_configured() and zenodo.is_configured()
+    assert client.get_secret_value.call_count == 1
+
+
+def test_unreadable_secret_means_not_configured_and_is_retried(no_token, caplog):
+    patcher, _, client = fake_secrets_manager(error=RuntimeError("access denied"))
+    with patcher:
+        zenodo = ZenodoClient(SECRET_CONFIG)
+        assert not zenodo.is_configured()
+        assert "access denied" in caplog.text
+        client.get_secret_value.side_effect = None
+        client.get_secret_value.return_value = {"SecretString": "abc123"}
+        assert zenodo.is_configured()
+
+
+def test_no_aws_call_without_base_url(no_token):
+    patcher, session, _ = fake_secrets_manager("abc123")
+    with patcher:
+        assert not ZenodoClient({"zenodo_aws_secret_name": "zenodo-token"}).is_configured()
+    session.client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mint_uses_the_token_from_the_secret(no_token):
+    seen = []
+    patcher, _, _ = fake_secrets_manager("from-secret")
+    with patcher:
+        async with fake_zenodo(seen) as http:
+            await ZenodoClient(SECRET_CONFIG, http).mint_doi_for_package(METADATA, [("a.json", b"{}")])
+    assert seen and all(r.url.params["access_token"] == "from-secret" for r in seen)

@@ -10,13 +10,24 @@ actually called.
 Configuration:
     --zenodo-base-url / ZENODO_BASE_URL   e.g. https://sandbox.zenodo.org/api
     --zenodo-community / ZENODO_COMMUNITY  (optional) community slug
-    ZENODO_TOKEN (environment variable only, like HOPAUTH_PASSWORD/DB_PASSWORD -
-                  deliberately not loadable from a TOML config file)
+
+The API token is a secret, so it is deliberately not loadable from a TOML
+config file. It is taken from either of:
+    ZENODO_TOKEN (environment variable, like HOPAUTH_PASSWORD/DB_PASSWORD),
+        which takes priority if set; or
+    --zenodo-aws-secret-name / ZENODO_AWS_SECRET_NAME
+    --zenodo-aws-secret-region / ZENODO_AWS_SECRET_REGION
+        the name and region of an AWS Secrets Manager secret holding the
+        token, either as plain text or as JSON with a "token" (or
+        "ZENODO_TOKEN") key. It is read the first time it is needed, and
+        the result is kept.
 """
+import json
 import logging
 import os
 from typing import Optional
 
+import boto3
 import httpx
 
 from . import utility_api
@@ -40,6 +51,39 @@ def add_parser_options(parser):
                         help="Optional Zenodo community slug to request newly minted "
                         "depositions join", type=str, action=EnvDefault,
                         envvar="ZENODO_COMMUNITY", required=False)
+    parser.add_argument("--zenodo-aws-secret-name",
+                        help="Name of an AWS secret from which to read the Zenodo API token",
+                        type=str, action=EnvDefault, envvar="ZENODO_AWS_SECRET_NAME",
+                        required=False)
+    parser.add_argument("--zenodo-aws-secret-region",
+                        help="Name of the AWS region in which to look for the AWS secret from "
+                        "which to read the Zenodo API token", type=str, action=EnvDefault,
+                        envvar="ZENODO_AWS_SECRET_REGION", default="us-west-2", required=False)
+
+
+def token_from_secret(secret_region: str, secret_name: str) -> str:
+    """
+    Read a Zenodo API token from an AWS Secrets Manager secret.
+
+    The secret may contain the token as plain text, or a JSON object with
+    the token under the key "token" or "ZENODO_TOKEN".
+    """
+    session = boto3.session.Session()
+    client = session.client(
+        service_name='secretsmanager',
+        region_name=secret_region
+    )
+    value = client.get_secret_value(SecretId=secret_name)['SecretString']
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict):
+        value = data.get("token") or data.get("ZENODO_TOKEN") or ""
+    value = value.strip()
+    if not value:
+        raise ValueError(f"No Zenodo token found in secret {secret_name}")
+    return value
 
 
 class ZenodoClient:
@@ -63,22 +107,40 @@ class ZenodoClient:
         self.base_url = (config.get("zenodo_base_url") or "").rstrip("/")
         self.community = config.get("zenodo_community")
         self._token = os.environ.get("ZENODO_TOKEN")
+        self._secret_name = config.get("zenodo_aws_secret_name")
+        self._secret_region = config.get("zenodo_aws_secret_region") or "us-west-2"
         self._http_client = http_client
+
+    def _get_token(self) -> Optional[str]:
+        """
+        Return the API token, or None if there is none. If it has to be read
+        from an AWS secret, that happens here, on first need, so that an
+        unreachable secret cannot prevent the archive from starting, and
+        so it is tried again on later requests until it succeeds.
+        """
+        if not self._token and self._secret_name:
+            try:
+                self._token = token_from_secret(self._secret_region, self._secret_name)
+            except Exception as err:
+                logger.error(f"Unable to read the Zenodo token from AWS secret "
+                             f"{self._secret_name}: {err}")
+        return self._token
 
     def is_configured(self) -> bool:
         """Return True if enough configuration is present to attempt a mint."""
-        return bool(self.base_url) and bool(self._token)
+        return bool(self.base_url) and bool(self._get_token())
 
     def _require_configured(self):
         if not self.is_configured():
             raise ZenodoNotConfiguredError(
                 "Zenodo is not configured on this archive instance. Set zenodo-base-url "
-                "and the ZENODO_TOKEN environment variable to enable DOI minting."
+                "and either the ZENODO_TOKEN environment variable or zenodo-aws-secret-name "
+                "to enable DOI minting."
             )
 
     @property
     def _auth_params(self) -> dict:
-        return {"access_token": self._token}
+        return {"access_token": self._get_token()}
 
     @staticmethod
     def _raise_for_status(response: httpx.Response, context: str):
