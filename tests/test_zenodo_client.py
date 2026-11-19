@@ -132,8 +132,10 @@ def test_environment_token_takes_priority_over_secret(monkeypatch):
     monkeypatch.setenv("ZENODO_TOKEN", "from-env")
     patcher, session, _ = fake_secrets_manager("from-secret")
     with patcher:
-        assert ZenodoClient(SECRET_CONFIG).is_configured()
+        z = ZenodoClient(SECRET_CONFIG)
+        assert z.is_configured()
     session.client.assert_not_called()
+    assert z._get_token() == "from-env"
 
 
 def test_constructing_never_reads_the_secret(no_token):
@@ -144,11 +146,13 @@ def test_constructing_never_reads_the_secret(no_token):
 
 
 def test_secret_is_read_once_and_kept(no_token):
-    patcher, _, client = fake_secrets_manager("abc123")
+    expected_secret = "abc123"
+    patcher, _, client = fake_secrets_manager(expected_secret)
     with patcher:
         zenodo = ZenodoClient(SECRET_CONFIG)
-        assert zenodo.is_configured() and zenodo.is_configured()
+        assert zenodo.is_configured()
     assert client.get_secret_value.call_count == 1
+    assert zenodo._get_token() == expected_secret
 
 
 def test_unreadable_secret_means_not_configured_and_is_retried(no_token, caplog):
@@ -158,8 +162,10 @@ def test_unreadable_secret_means_not_configured_and_is_retried(no_token, caplog)
         assert not zenodo.is_configured()
         assert "access denied" in caplog.text
         client.get_secret_value.side_effect = None
-        client.get_secret_value.return_value = {"SecretString": "abc123"}
+        expected_secret = "abc123"
+        client.get_secret_value.return_value = {"SecretString": expected_secret}
         assert zenodo.is_configured()
+        assert zenodo._get_token() == expected_secret
 
 
 def test_no_aws_call_without_base_url(no_token):
